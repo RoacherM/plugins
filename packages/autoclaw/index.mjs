@@ -42,6 +42,12 @@ const OFFICIAL_SYSTEM_PROMPT = 'You are AutoClaw. Answer the user directly and c
 const WALLETS_PATH = `/agent-assetmgr/api/v2/wallets?biz_app_id=${PRODUCT}`;
 
 const FLAGGED = [
+  // Claude Code 2.1.30x opens with an SDK identity line, not the CLI one;
+  // the CN gateway refuses "Claude Agent SDK" in any case with 406. Take the
+  // trailing period and the article/possessive so the replacement reads as
+  // a sentence, not "assistant.." or "Anthropic's the agent framework".
+  [/You are a Claude agent, built on Anthropic's Claude Agent SDK\.?/gi, "You are a coding assistant."],
+  [/(?:Anthropic's |the )?Claude Agent SDK/gi, "the agent framework"],
   [/You are an AI agent powered by DeepSeek Harness/gi, "You are an AI agent powered by DeepSeek-Harness"],
   [/You are Claude Code/gi, "You are the Claude Code CLI"],
   [/You are Codex/gi, "You are the Codex agent"],
@@ -84,7 +90,7 @@ function unflag(messages) {
 }
 
 const REFUSED_HINT =
-  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
+  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Claude Agent SDK, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
 
 async function explained(res) {
   if (res.status < 400) return res;
@@ -382,6 +388,18 @@ function checkinOutcome(r) {
 const signinTriedLocal = new Map(); // key → hour-stamp of last SUCCESSFUL signin
 
 /**
+ * 补签去重键：每个登录一个（#254）。显示名可以重复（AutoClaw 默认昵称改不了），
+ * 所以按 uid，没有 uid 的旧账号按 refresh token 的哈希；只用供应商 id 会让
+ * 同一供应商下的第二个账号当天永远不补签。
+ */
+function signinAccountKey(providerId, auth) {
+  const uid = String(auth?.uid ?? "").trim();
+  if (uid) return `${providerId}|uid:${uid}`;
+  const tok = bareToken(String(auth?.refresh ?? auth?.access ?? ""));
+  return `${providerId}|tok:${createHash("sha256").update(tok).digest("hex").slice(0, 16)}`;
+}
+
+/**
  * 签到配置合并：插件 options（plugins.json 的 options 字段）优先，
  * 其次配置文件 ~/.config/magpie/autoclaw.json（热读取，GUI 没有选项入口时的保底通道）：
  *   { "signin": true, "signinHour": null, "signinOnUsage": false }
@@ -549,7 +567,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
 
       async refresh(auth) {
         const t = await refreshTokens(bareToken(auth.refresh), [homeHost]);
-        await maybeSignin(t.access, homeHost, options, "refresh", providerId);
+        await maybeSignin(t.access, homeHost, options, "refresh", signinAccountKey(providerId, auth));
         // 存量账号就地正名：登录响应缺昵称的旧账号（GUI 显示「已登录」），
         // 刷新时补拉 user-profile。magpie 的 refresh 返回字段会合并进账号。
         const old = String(auth.accountId ?? auth.email ?? "");
@@ -628,7 +646,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
               headers,
               body: JSON.stringify(payload),
             });
-            if (res.status !== 401 && res.status !== 403) return res;
+            if (res.status !== 401 && res.status !== 403) return explained(res);
             try { res.body?.cancel?.(); } catch {}
             return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效", type: "invalid_request_error" } }), {
               status: 401,
@@ -652,7 +670,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
           // 旧链路自动补签（默认关，需 signinOnUsage=true）：查额度即触发。
           // 放在状态查询之后：未签才补，补完重查一次状态展示。
           if (signin && signin.status !== "completed" && (cfg.signin && cfg.signinOnUsage)) {
-            await maybeSignin(token, hosts[0], options, "usage", providerId);
+            await maybeSignin(token, hosts[0], options, "usage", signinAccountKey(providerId, auth));
           }
           const signinFinal = signin?.status === "completed"
             ? signin
@@ -1203,7 +1221,7 @@ export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
 export const _internal = {
   makePluginForTest: makeAutoclawPlugin,
   md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
-  dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
+  dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,
   fetchUserProfile, accountDisplayName, startLocalOAuth,
   FLAGGED, unflagged, unflag, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,
