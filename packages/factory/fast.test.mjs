@@ -8,11 +8,14 @@ import { readFileSync } from "node:fs"
 import { FactoryAuthPlugin } from "./index.mjs"
 
 const DROID = readFileSync(new URL("./testdata/droid-0.240.0-fast.txt", import.meta.url), "utf8")
+const DROID_244 = readFileSync(new URL("./testdata/droid-0.244.0-models.txt", import.meta.url), "utf8")
 const real = globalThis.fetch
 afterEach(() => (globalThis.fetch = real))
 
 function entry(id) {
-  const line = DROID.split("\n").find((l) => l.startsWith(`"${id}":{id:"${id}",`))
+  const line = [DROID, DROID_244]
+    .map((text) => text.split("\n").find((l) => l.startsWith(`"${id}":{id:"${id}",`)))
+    .find(Boolean)
   if (!line) throw new Error(`${id} is not in the fixture`)
   return line
 }
@@ -30,7 +33,7 @@ async function plugin() {
   return { models: cfg.provider.factory.models, l: await hooks.auth.loader(async () => auth), seen }
 }
 
-const OFFERED = ["claude-opus-5-5-fast", "claude-opus-5-fast", "claude-opus-4-8-fast", "gpt-5.5-fast", "gpt-5.4-fast", "gpt-5.3-codex-fast"]
+const OFFERED = ["claude-opus-5-5-fast", "claude-opus-5-fast", "claude-opus-4-8-fast", "gpt-5.5-fast", "gpt-5.4-fast", "gpt-5.3-codex-fast", "gpt-6-sol-fast", "gpt-6-luna-fast"]
 
 test("droid's Fast Mode models are offered at their base model's limits and efforts", async () => {
   const { models } = await plugin()
@@ -94,9 +97,9 @@ test("a GPT Fast Mode model goes out as droid sends it: its own id at the priori
   sent = JSON.parse(seen[1].body)
   expect(sent.model).toBe("gpt-5.5-fast")
   // a model with no Fast Mode model is left as it was asked
-  await l.fetch(url, { method: "POST", body: JSON.stringify({ model: "gpt-6-sol", service_tier: "priority", input: "hi" }) })
+  await l.fetch(url, { method: "POST", body: JSON.stringify({ model: "gpt-6-astra", service_tier: "priority", input: "hi" }) })
   sent = JSON.parse(seen[2].body)
-  expect(sent.model).toBe("gpt-6-sol")
+  expect(sent.model).toBe("gpt-6-astra")
   expect(sent.service_tier).toBe("priority")
 })
 

@@ -109,3 +109,23 @@ test("droid 0.241.1's Gemini models are offered on Factory's Gemini route, as dr
   }
   expect(got["gemini-4-argon"].variants.high).toEqual({ thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } })
 })
+
+// droid 0.244.0 adds Muse Spark Open and 1.2 and Beam 1.0. The cases are its
+// own registry entries.
+const DROID_244 = readFileSync(new URL("./testdata/droid-0.244.0-models.txt", import.meta.url), "utf8")
+
+test("droid 0.244.0's Muse Spark and Beam models are offered as droid has them", async () => {
+  const got = await models()
+  for (const id of ["muse-spark-open", "muse-spark-1.2", "beam-1.0"]) {
+    const text = DROID_244.split("\n").find((l) => l.startsWith(`"${id}":{id:"${id}",`))
+    expect(text).toBeDefined()
+    const m = got[id]
+    expect(m).toBeDefined()
+    expect(m.name).toBe(text.match(/,name:"([^"]+)"/)[1])
+    const [, context, output] = text.match(/contextLimits:I\((\d+),(\d+)\)/)
+    expect(m.limit).toEqual({ context: Number(context), output: Number(output) })
+    expect(Object.keys(m.variants)).toEqual(JSON.parse(text.match(/reasoningEffort:\{supported:(\[[^\]]*\])/)[1]))
+    expect(m.attachment).toBe(!text.includes("images:!1"))
+    expect(m.provider).toEqual({ npm: "@ai-sdk/openai-compatible", api: "https://api.factory.ai/api/llm/o/v1" })
+  }
+})

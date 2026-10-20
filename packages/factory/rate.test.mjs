@@ -4,12 +4,15 @@
 // droid. A promotion running comes off it, with the multiplier before the
 // discount as rateWas — magpie strikes that through beside the price, as it
 // does for WorkBuddy's credits and Qoder's price factors. The cases are droid
-// 0.241.1's own registry entries, saved byte for byte in testdata.
+// 0.241.1's and 0.244.0's own registry entries, saved byte for byte in testdata.
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { FactoryAuthPlugin, _internal } from "./index.mjs"
 
-const DROID = readFileSync(new URL("./testdata/droid-0.241.1-costs.txt", import.meta.url), "utf8")
+const DROID = [
+  readFileSync(new URL("./testdata/droid-0.241.1-costs.txt", import.meta.url), "utf8"),
+  readFileSync(new URL("./testdata/droid-0.244.0-costs.txt", import.meta.url), "utf8"),
+].join("\n")
 
 // cost is a model's cost text, as its entry keeps it.
 function cost(id) {
@@ -53,7 +56,7 @@ function price(id, now) {
   return { rate: Number((base * (1 - p.discount)).toFixed(4)), rateWas: base }
 }
 
-test("every model's rate is the token multiplier droid 0.241.1 lists it with", () => {
+test("every model's rate is the token multiplier droid 0.241.1/0.244.0 lists it with", () => {
   for (const m of _internal.MODELS) {
     expect(m.rate).toBe(multiplier(m.id))
   }

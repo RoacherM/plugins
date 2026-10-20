@@ -1,0 +1,8 @@
+// Excerpts, byte for byte, of droid 0.244.0 (@factory/cli-darwin-arm64@0.244.0,
+// bin/droid, its bundled model registry): the cost of the models new since
+// 0.241.1 — Muse Spark Open and 1.2, Beam 1.0, and GPT-6 Sol/Luna Fast Mode.
+"muse-spark-open":cost:{tokenMultiplier:0.5,cacheReadTokenMultiplier:0.12,outputTokenMultiplier:3.4}
+"muse-spark-1.2":cost:{tokenMultiplier:0.5,cacheReadTokenMultiplier:0.12,outputTokenMultiplier:3.4}
+"beam-1.0":cost:{tokenMultiplier:0.52,outputTokenMultiplier:3.3076923076923075}
+"gpt-6-sol-fast":cost:{tokenMultiplier:1.6,outputTokenMultiplier:5}
+"gpt-6-luna-fast":cost:{tokenMultiplier:0.08,outputTokenMultiplier:5}

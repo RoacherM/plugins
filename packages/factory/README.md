@@ -64,8 +64,8 @@ Each model is served on the one API droid uses for it:
 | API | Models |
 |---|---|
 | Anthropic Messages (`/api/llm/a`) | Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8 (each also in Fast Mode), Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 5.5, Haiku 4.5, MiniMax M2.7 |
-| OpenAI Responses (`/api/llm/o/v1`) | GPT-6.1 Sol, GPT-6 Sol/Astra/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.3-Codex (each also in Fast Mode), Grok 4.7, Grok 4.6 |
-| Chat completions (`/api/llm/o/v1`) | GLM-5.3, GLM-5.3-Flash, GLM-5.2, Kimi K3, DeepSeek V4.1 Flash, Qwen3.8 Max, MiniMax M3, Mistral Large 4, Mistral Medium 3.5, Nemotron 3 Ultra |
+| OpenAI Responses (`/api/llm/o/v1`) | GPT-6.1 Sol, GPT-6 Sol/Luna (also in Fast Mode), GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.3-Codex (each also in Fast Mode), Grok 4.7, Grok 4.6 |
+| Chat completions (`/api/llm/o/v1`) | GLM-5.3, GLM-5.3-Flash, GLM-5.2, Kimi K3, DeepSeek V4.1 Flash, Qwen3.8 Max, MiniMax M3, Mistral Large 4, Mistral Medium 3.5, Nemotron 3 Ultra, Muse Spark Open, Muse Spark 1.2, Beam 1.0 |
 | Gemini generate (`/api/llm/g/v1/generate`) | Gemini 4 Argon, Gemini 3.1 Pro, Gemini 3.8/3.7/3.6/3.5 Flash, Gemini 3 Flash |
 
 Reasoning efforts are the variants droid offers for each model. DeepSeek V4.1
@@ -83,7 +83,7 @@ hold. A promotion that has ended is no discount at all.
 
 Gemini's requests go to Factory's generate route with the model in the
 body, droid's line opening the system instruction. Gemini 4 Argon is behind
-a Factory feature flag in droid 0.241.1, so an account it isn't on for may
+a Factory feature flag in droid 0.244.0, so an account it isn't on for may
 be refused it.
 
 A Fast Mode model (`claude-opus-5-5-fast`, `gpt-5.5-fast`, …) is its base
@@ -93,8 +93,12 @@ beta on Anthropic's API, at `service_tier: "priority"` on OpenAI's. A request
 that asks the base model for fast (Claude Code's `speed: "fast"`, a
 Responses request's `service_tier: "priority"`) is sent to its Fast Mode
 model, as droid's own fast toggle does: asked of the base model, Factory
-answered at standard speed (#119). Opus 4.6/4.7 Fast, GPT-5.4 Mini Fast, GPT-5.6 Sol Fast (unreleased)
-and GLM-5.2 Fast (behind a feature flag) are not included.
+answered at standard speed (#119). Opus 4.6/4.7 Fast, GPT-5.4 Mini Fast, GPT-5.6 Sol Fast (unreleased),
+GPT-6.1 Sol Ultra Fast (explicit opt-in) and GLM-5.2 Fast (behind a feature
+flag) are not included.
+
+Muse Spark Open and 1.2, Beam 1.0, and GPT-6 Sol/Luna Fast Mode are droid
+0.244.0's.
 
 auto is not included: droid picks it on the client side.
 

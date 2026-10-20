@@ -15,12 +15,12 @@ const API_EU = "https://api.eu.factory.ai"
 // droid's WorkOS client, production
 const CLIENT_ID = "client_01HNM792M5G5G1A2THWPXKFMXB"
 // the droid release the requests say they are: the current one (droid
-// 0.242.0's X-Client-Version and User-Agent). Its binary reads a
+// 0.244.0's X-Client-Version and User-Agent). Its binary reads a
 // server-side min_cli_version, and both reports of every model answered a
 // bare 403 "Forbidden" (0.1.16, 0.1.30) came with this release behind
 // droid's while every other header matched; whether Factory refuses an old
 // release so is not confirmed
-const VERSION = "0.242.0"
+const VERSION = "0.244.0"
 // how long before an access token lapses it is renewed (droid: a minute)
 const REFRESH_LEAD = 2 * 60 * 1000
 // and how long before, magpie renews it ahead of time (auth.refresh): a
@@ -48,14 +48,17 @@ const E4 = ["low", "medium", "high", "xhigh"]
 // Mistral Large 4 are droid 0.240.0's (models.test.mjs reads its registry);
 // GPT-6 Astra Ultra Fast, new there too, stays out: droid offers it only
 // after the user accepts Factory's high-cost terms for it
-// (explicitOptInRequirement). Gemini's are droid 0.241.1's, as magpie's
-// built-in has them (yetone/magpie#2080); Gemini 4 Argon is behind a
-// feature flag of Factory's there, so an account it isn't on for may be
-// refused it. The Fast Mode models are droid 0.240.0's (fastBody; testdata/
-// droid-0.240.0-fast.txt), at their base model's limits and efforts as
+// (explicitOptInRequirement). Gemini's are droid 0.241.1's (unchanged in
+// 0.244.0), as magpie's built-in has them (yetone/magpie#2080); Gemini 4
+// Argon is behind a feature flag of Factory's there, so an account it isn't
+// on for may be refused it. Muse Spark Open and 1.2, Beam 1.0, and GPT-6
+// Sol/Luna Fast Mode are droid 0.244.0's. The Fast Mode models are droid
+// 0.240.0's and 0.244.0's (fastBody; testdata/droid-0.240.0-fast.txt and
+// droid-0.244.0-models.txt), at their base model's limits and efforts as
 // droid has them. Left out: Opus 4.6/4.7 Fast and GPT-5.4 Mini Fast (their
-// base models aren't offered), GPT-5.6 Sol Fast (unreleased:!0) and
-// GLM-5.2 Fast (behind a feature flag, on a Baseten model id of its own).
+// base models aren't offered), GPT-5.6 Sol Fast (unreleased:!0), GPT-6.1 Sol
+// Ultra Fast (explicit opt-in) and GLM-5.2 Fast (behind a feature flag, on a
+// Baseten model id of its own).
 const MODELS = [
   ["claude-fable-5.1", "Fable 5.1", ANTHROPIC, "anthropic", 867000, 128000, E5, true, 4],
   ["claude-fable-5", "Fable 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true, 4],
@@ -93,6 +96,9 @@ const MODELS = [
   ["mistral-large-4", "Mistral Large 4", CHAT, "mistral", 524288, 64000, ["high"], true, 0.544],
   ["mistral-medium-3.5", "Mistral Medium 3.5", CHAT, "mistral", 256000, 64000, ["high"], true, 0.6],
   ["nemotron-3-ultra", "Nemotron 3 Ultra", CHAT, "baseten", 202000, 65536, ["high"], false, 0.24],
+  ["muse-spark-open", "Muse Spark Open", CHAT, "baseten", 1040000, 131072, E5, true, 0.5],
+  ["muse-spark-1.2", "Muse Spark 1.2", CHAT, "fireworks", 1040000, 131072, E4, false, 0.5],
+  ["beam-1.0", "Beam 1.0", CHAT, "baseten", 1048576, 32768, E5, false, 0.52],
   ["gemini-4-argon", "Gemini 4 Argon", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true, 1.6],
   ["gemini-3.1-pro-preview", "Gemini 3.1 Pro", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true, 0.8],
   ["gemini-3.8-flash", "Gemini 3.8 Flash", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true, 0.6],
@@ -112,6 +118,8 @@ const MODELS = [
   ["gpt-5.5-fast", "GPT-5.5 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true, 5],
   ["gpt-5.4-fast", "GPT-5.4 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true, 2],
   ["gpt-5.3-codex-fast", "GPT-5.3-Codex Fast Mode", RESPONSES, "openai", 400000, 128000, E4, true, 1.4],
+  ["gpt-6-sol-fast", "GPT-6 Sol Fast Mode", RESPONSES, "openai", 1050000, 128000, E6, true, 1.6],
+  ["gpt-6-luna-fast", "GPT-6 Luna Fast Mode", RESPONSES, "openai", 1050000, 128000, E6, true, 0.08],
 ].map(([id, name, wire, upstream, context, output, efforts, images, rate]) => ({ id, name, wire, upstream, context, output, efforts, images, rate }))
 
 const byId = new Map(MODELS.map((m) => [m.id, m]))

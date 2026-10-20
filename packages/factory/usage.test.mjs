@@ -20,7 +20,7 @@ const LIMITS = {
   extraUsageAllowed: true,
 }
 
-const CORE = ["glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "deepseek-v4.1-flash", "qwen3.8-max", "minimax-m3", "minimax-m2.7", "mistral-large-4", "mistral-medium-3.5", "nemotron-3-ultra"]
+const CORE = ["glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "deepseek-v4.1-flash", "qwen3.8-max", "minimax-m3", "minimax-m2.7", "mistral-large-4", "mistral-medium-3.5", "nemotron-3-ultra", "muse-spark-open", "muse-spark-1.2", "beam-1.0"]
 
 const account = (over = {}) => ({
   type: "oauth",
