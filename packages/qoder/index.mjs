@@ -43,7 +43,14 @@ import { join, resolve } from "node:path"
 
 const CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 const MODELS_PATH = "/algo/api/v2/model/list?Encode=1"
-const COSY_VERSION = "1.1.49"
+// The build the envelope claims. It has to be the one Qoder's desktop app
+// talks through — the worker runtime bundled in the app — because the
+// envelope also says Cosy-ClientType: 10 (desktop) and carries that app's
+// machine identity; the CLI's channel publishes a different, later number
+// that no desktop build runs. Taken from app 0.4.8 (build 79743374,
+// 2026-10-14), whose transport config names 1.1.69. Raise it when the app
+// moves, not when the CLI does.
+const COSY_VERSION = "1.1.69"
 const SIGN_IN_TIMEOUT = 15 * 60 * 1000
 const REFRESH_LEAD = 5 * 60 * 1000 // a chat token this close to its end is refreshed before a request
 const RENEW_LEAD = 10 * 60 * 1000 // and this close, magpie renews it ahead of time (auth.refresh)
@@ -687,6 +694,17 @@ const textOf = (c) => (typeof c === "string" ? c : blocksOf(c).filter((b) => b.t
 // blocks, an assistant's tool calls as tool_calls, results as tool turns by
 // tool_call_id. A tool turn holds text only, so the images a tool returned
 // follow in a user turn — the start of the user's own when one comes next.
+//
+// Qoder turns the whole request away when a tool turn answers no call of the
+// turn before it ("Messages with role 'tool' must be a response to a
+// preceding message with 'tool_calls'"), where another API takes the same
+// conversation. A client's history reaches here with such a turn because it
+// dropped the id: either the call lost it, so the result names one no call
+// has, or the result kept none. Both are filled in rather than dropped — a
+// call without an id is given one, and the results after it take the ids it
+// went out with in order, which is the pairing a dropped id means. Only a
+// result with no call of its turn left to answer becomes text in the user's
+// own turn, so the words the tool returned stay with the conversation.
 function qoderMessages(msgs) {
   const out = []
   const names = {}
@@ -695,31 +713,64 @@ function qoderMessages(msgs) {
     if (seen.length) out.push({ role: "user", content: seen })
     seen = []
   }
-  for (const m of msgs) {
+  // turn is the assistant turn being answered: the calls no result has
+  // answered yet, in the order they were made, and the ones a result after
+  // it names (kept), which a result whose id was lost must not take.
+  let turn = null
+  const asText = (txt, ims) => {
+    const said = txt.trim()
+    if (!said && !ims.length) return
+    if (seen.length) seen.push({ type: "text", text: "\n\n" })
+    if (said) seen.push({ type: "text", text: said })
+    seen.push(...ims)
+  }
+  for (const [i, m] of msgs.entries()) {
     if (m.role === "system" || m.role === "developer") continue
+    if (m.role === "user") turn = null
     if (m.role !== "user" && m.role !== "tool") showSeen()
     if (m.role === "tool") {
       let txt = textOf(m.content)
       const ims = Array.isArray(m.content) ? m.content.filter((p) => p?.type === "image_url").map(imageBlock).filter(Boolean) : []
+      const named = String(m.tool_call_id ?? "").trim()
+      // A result naming a call of this turn answers it; one whose id the
+      // client lost — none, or one no call here has — answers the earliest
+      // call still open that no other result names, which is the order the
+      // calls were made in.
+      const at = named ? turn?.open.findIndex((id) => id === named) ?? -1 : -1
+      const pick = at >= 0 ? at : turn ? turn.open.findIndex((id) => !turn.kept.has(id)) : -1
+      if (pick < 0) {
+        asText(txt, ims)
+        continue
+      }
+      const answered = turn.open.splice(pick, 1)[0]
       if (ims.length) {
-        let of = "tool call " + m.tool_call_id
-        const name = names[m.tool_call_id] || m.name
+        let of = "tool call " + answered
+        const name = names[answered] || m.name
         if (name) of = `${name} (${of})`
         seen.push({ type: "text", text: `[From the result of ${of}:]` }, ...ims)
         const note = ims.length === 1 ? "[The tool returned an image; it follows in the next message.]" : `[The tool returned ${ims.length} images; they follow in the next message.]`
         txt = txt.trim() ? txt + "\n\n" + note : txt + note
       }
-      out.push({ role: "tool", tool_call_id: m.tool_call_id, content: txt })
+      out.push({ role: "tool", tool_call_id: answered, content: txt })
       continue
     }
     if (m.role === "assistant" && m.tool_calls?.length) {
+      // a call the client sent without an id gets one, so its result can
+      // answer it instead of being turned into text
       const calls = m.tool_calls.map((c) => {
-        const id = c.id || "call_" + hexID()
+        const id = String(c.id ?? "").trim() || "call_" + hexID()
         names[id] = c.function?.name
         const args = c.function?.arguments
         return { id, type: "function", function: { name: c.function?.name, arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}) } }
       })
       out.push({ role: "assistant", content: textOf(m.content), tool_calls: calls })
+      const open = calls.map((c) => c.id)
+      const kept = new Set()
+      for (let j = i + 1; j < msgs.length && msgs[j].role === "tool"; j++) {
+        const id = String(msgs[j].tool_call_id ?? "").trim()
+        if (open.includes(id)) kept.add(id)
+      }
+      turn = { open, kept }
       continue
     }
     let blocks = blocksOf(m.content)
@@ -727,6 +778,8 @@ function qoderMessages(msgs) {
     if (!blocks.length) continue
     if (m.role === "user" && seen.length) [blocks, seen] = [[...seen, ...blocks], []]
     out.push({ role: m.role, content: blocks })
+    // a result after the assistant's own words answers no call before it
+    turn = null
   }
   showSeen()
   return out
@@ -796,6 +849,14 @@ const QUOTA_CODES = new Set(["110", "112", "113", "114", "115", "116", "117", "1
 // supported, input too long, too many media, a custom model's service
 const REQUEST_CODES = new Set(["406", "416", "430", "80411", "80412", "100400", "100401", "100403"])
 const BUSY_WAIT = 30
+// UPSTREAM_FAILED is Qoder saying the model's own vendor behind it failed:
+// "Error in upstream response", which Qoder sends as a 400 (SlouchyQuill507
+// on Discord, qoder-cn). Nothing is wrong with the request or the account,
+// so it is a 502, which magpie asks again or of another account, not a
+// 400 that ends the turn as the client's fault. A request too long for the
+// model fails the same way, and magpie tells that one apart by its size
+// (tooLongUnsaid), at 502 as at 400.
+const UPSTREAM_FAILED = /\berror in upstream response\b/i
 
 function failure(status, text) {
   if (status < 400 || status > 599) status = 502
@@ -841,6 +902,7 @@ function failure(status, text) {
   }
   if (QUOTA_CODES.has(code)) return { status: 429, message: "usage limit reached: " + msg, signIn: "" }
   if (REQUEST_CODES.has(code)) return { status: 400, message: `Qoder refused the request (${code}): ${msg}`, signIn: "" }
+  if (UPSTREAM_FAILED.test(msg)) return { status: 502, message: msg, signIn: "" }
   // a refused chat is the built-in's 401, which never marked the account
   // lapsed: only a refused refresh did (errorResponse says kept). Qoder's
   // own words go with it: a 401 right after signing in isn't a lapsed
@@ -1442,7 +1504,10 @@ const SITES = {
     web: "https://qoder.com",
     openapi: "https://openapi.qoder.sh",
     api: "https://api3.qoder.sh",
-    redirect: "qoder-app://",
+    // none, as Qoder's CLI (@qoder-ai/qodercli 1.1.75) sends: the desktop
+    // app's qoder-app:// hands the finished page to Qoder.app, when it is
+    // installed, instead of leaving it in the tab while this polls (#276)
+    redirect: "",
     models: MODELS,
   },
   "qoder-cn": {
@@ -1928,4 +1993,4 @@ export const QoderAuthPlugin = makePlugin(SITES.qoder)
 export const QoderCNAuthPlugin = makePlugin(SITES["qoder-cn"])
 
 // for tests
-export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, SITES, decodeBody, events }
+export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, SITES, decodeBody, events }
