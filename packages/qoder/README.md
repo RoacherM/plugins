@@ -91,6 +91,17 @@ itself.
     answers no call before it. A result with no call left to answer goes
     as text in the user's turn.
   - Your tools become Qoder's native function tools.
+  - A call the client sent without an id gets one made from its turn, its
+    place and its arguments, so it goes out the same on every request.
+- It marks the prompt for Qoder's cache as Qoder's own client does (since
+  0.2.26, #290): the last block of the last user turn carries
+  `cache_control: ephemeral` (nothing is marked when the last turn is a
+  tool's result), user turns carry their blocks as `contents` too, and each
+  request names its conversation in `session_id`. That id is a hash of
+  Codex's thread (`prompt_cache_key`) when magpie sends one, else of the
+  conversation's start, so every turn of one conversation names the same
+  session; the key itself never goes out. Each request has its own
+  `request_id`.
   - The model's own configuration from Qoder's list goes with it.
 - It picks the reasoning effort from the model's own levels:
   - The nearest level to the one asked, the higher one on a tie.
@@ -257,8 +268,8 @@ the account's credentials.
 
 - Install Qoder desktop, or sign in to Qoder CLI once, to make its native
   runtime available. The plugin finds the desktop's `resources/umid`
-  (`Qoder.app` on macOS, `%LOCALAPPDATA%\Programs\Qoder` on Windows,
-  `/opt/Qoder` on Linux) or the runtime the CLI caches in `~/.qoder/.bin`
+  (`Qoder.app` on macOS, `%LOCALAPPDATA%\Programs\Qoder` or, since
+  0.2.26, `%ProgramFiles%\Qoder` on Windows, `/opt/Qoder` on Linux) or the runtime the CLI caches in `~/.qoder/.bin`
   (`runtime-info-<platform>-<arch>-*` on macOS and Linux,
   `umid-win32-x64-*\runtime-info.exe` on Windows; `QODER_CONFIG_DIR`,
   `QODER_CLI_HOME` and `QODER_CONFIG_DIR_NAME` move it as they move the
@@ -266,9 +277,16 @@ the account's credentials.
 - For another installation location, set `QODER_RUNTIME_INFO` to the
   absolute path of Qoder's installed `runtime-info` executable
   (`runtime-info.exe` on Windows), with its accompanying SDK files.
-- A missing helper or invalid identity is an error, rather than a false
-  "no activity" result. Qoder CN keeps its existing requests and does
-  not need this local helper.
+- With no helper anywhere (a machine that never had Qoder desktop or
+  Qoder CLI), the check-in is `ineligible` for the day, with a message
+  saying to install one (or set `QODER_RUNTIME_INFO`); magpie asks again
+  the next day rather than every 30 minutes (#304). The identity comes
+  only from Qoder's own helper: the plugin never makes one up, so such an
+  international account gets no daily claim until Qoder is installed.
+- A helper that is there but can't be read, or gives an invalid identity,
+  is `failed` and asked again later, rather than a false "no activity"
+  result. Qoder CN keeps its existing requests and does not need this
+  local helper.
 
 - **List:** `GET <openapi>/sash/api/v1/me/campaigns`: `campaigns[]` with
   `campaignId`, `actionType`, `claimStatus` (`CLAIMABLE`, `CLAIMED`),
