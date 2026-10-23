@@ -98,10 +98,20 @@ itself.
   `cache_control: ephemeral` (nothing is marked when the last turn is a
   tool's result), user turns carry their blocks as `contents` too, and each
   request names its conversation in `session_id`. That id is a hash of
-  Codex's thread (`prompt_cache_key`) when magpie sends one, else of the
-  conversation's start, so every turn of one conversation names the same
-  session; the key itself never goes out. Each request has its own
-  `request_id`.
+  the session the agent names (since 0.2.31, #330: DSH's
+  `x-deepseek-harness-session-id` and the other agents' own session
+  headers, which magpie hands the plugin's `chat.headers` hook, and
+  OpenCode's session), else of Codex's thread (`prompt_cache_key`) when
+  magpie sends one, else of the conversation's start, so every turn of one
+  conversation names the same session; the key itself never goes out.
+  Each request has its own `request_id` and `chat_record_id`.
+- Every call that answers one user prompt goes out as one task, as Qoder's
+  own client sends it (since 0.2.31, #330): one `request_set_id`, which is
+  also `business.id`, and one `business.begin_at` for every call of the
+  tool loop, `business.stage` "start" until a call is answered and
+  "processing" after. A new user prompt in the session is a new task. The
+  plugin keeps at most 512 tasks, each for 2 hours after its last call.
+  Before 0.2.31 each call was a task of its own.
   - The model's own configuration from Qoder's list goes with it.
 - It picks the reasoning effort from the model's own levels:
   - The nearest level to the one asked, the higher one on a tie.
@@ -139,7 +149,7 @@ itself.
 |---|---|
 | A refused sign-in (no code, or code 105) | 401 |
 | A quota (codes 110, 112–119, 122) | 429 |
-| Busy or queued for the model (code 10605) | 503, with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none); the sign-in is untouched |
+| Busy or queued for the model (code 10605) | Since 0.2.28 the request waits in Qoder's queue as Qoder's client does (below), then is sent again; past the wait, 503 with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none). The sign-in is untouched |
 | A refusal of the request itself (codes 406, 416, 430, 80411, 80412, 100400–100403) | 400, with Qoder's words |
 | "Error in upstream response", the model's own vendor behind Qoder failing, which Qoder sends as a 400 (since 0.2.24) | 502, so magpie asks again or another account; the sign-in is untouched |
 | A failure before the answer starts | Qoder's status |
@@ -285,8 +295,28 @@ the account's credentials.
   international account gets no daily claim until Qoder is installed.
 - A helper that is there but can't be read, or gives an invalid identity,
   is `failed` and asked again later, rather than a false "no activity"
-  result. Qoder CN keeps its existing requests and does not need this
-  local helper.
+  result.
+
+Qoder CN (since 0.2.30) sends its own device identity the same way when
+Qoder CN is installed: its desktop 0.4.9 and CLI (`qoderclicn`) both ask
+Qoder CN's `runtime-info` for environment `0` (the international one is
+`3`) and send it on the campaigns pages (yetone/magpie#2911, #304).
+
+- The plugin finds Qoder CN desktop's `resources/umid` (`Qoder CN.app` on
+  macOS, `%LOCALAPPDATA%\Programs\Qoder CN` or `%ProgramFiles%\Qoder CN`
+  on Windows, `/opt/Qoder-CN` on Linux) or the runtime its CLI caches in
+  `~/.qoder-cn/.bin` (`QODERCN_CONFIG_DIR`, `QODERCN_CLI_HOME` and
+  `QODERCN_CONFIG_DIR_NAME` move it). `QODERCN_RUNTIME_INFO` names
+  another location; `QODER_RUNTIME_INFO` is only the international one's.
+- Without it the requests go out as before, as Qoder CN's desktop does
+  when it can't read the identity, and a claim the list still offers is
+  made. When the list then offers no daily claim, the check-in is
+  `ineligible` for the day with a message to install Qoder CN desktop (or
+  sign in to its CLI); a helper that is there but can't be read makes it
+  `failed`, asked again later.
+- Not tried with a real Qoder CN account: whether Qoder CN now hides the
+  daily claim from a request without the identity, as the international
+  site does, is inferred from its clients, not seen.
 
 - **List:** `GET <openapi>/sash/api/v1/me/campaigns`: `campaigns[]` with
   `campaignId`, `actionType`, `claimStatus` (`CLAIMABLE`, `CLAIMED`),
@@ -318,6 +348,20 @@ by a BOM or wrapped in an outer message is read as busy too; see
 That parser fix does not remove the provider's limit or prove that every
 live 401 had the same cause. A timeout likewise does not establish an
 empty wallet or an expired login.
+
+Since **0.2.28** a queued request waits its turn as Qoder's own client
+(Qoder.app 0.4.3's agent worker) waits it: it asks
+`/api/v2/service/ask/queue/status` with the request's `requestSetId`, the
+model and the plan's `queueType`, at once and then every
+`retryAfterSeconds` (held to 0.5–30s, 30s when unsaid), and once
+`isQueued` is false it waits that state's `retryAfterSeconds` and sends the
+same request again (up to 10 times). Qoder's client waits up to an hour;
+the plugin waits at most 4 minutes from the request's start, since nothing
+reaches the agent meanwhile (magpie keeps a stream alive with comments for
+5 minutes of silence). Three failed status asks in a row, a 404, or a
+cancelled request end the wait early. Qoder's client also reports the end
+of its turn to `/api/v2/service/ask/finish`; the plugin doesn't, and
+Qoder releases that lease on its own TTL. `queue.test.mjs` has the wait.
 
 For a bounded offline reproduction, run `packages/qoder/busy.test.mjs`
 from #185 in an isolated temporary HOME. It compares plain queue JSON,
