@@ -59,7 +59,7 @@ const start = (site) => {
 // send makes a request as @ai-sdk/anthropic does, to the URL it was made for
 // place is what magpie tells the fetch of where the agent works, as its
 // headers: {dir, git}
-async function send(auth, body, { url = "https://api.z.ai/api/anthropic/v1/messages", asRequest = false, place = {}, extra = {} } = {}) {
+async function send(auth, body, { url = "https://api.z.ai/api/anthropic/v1/messages", asRequest = false, place = {}, extra = {}, requests = 1 } = {}) {
   routeToFake()
   const hooks = await ZCodeAuthPlugin({ client: { auth: { set: async () => {} } } })
   const opts = await hooks.auth.loader(async () => auth, { id: "zcode" })
@@ -70,8 +70,10 @@ async function send(auth, body, { url = "https://api.z.ai/api/anthropic/v1/messa
     ? await opts.fetch(new Request(url, { method: "POST", headers, body }))
     : await opts.fetch(url, { method: "POST", headers, body })
   expect(res.status).toBe(200)
-  expect(got.length).toBe(1)
-  return got[0]
+  expect(got.length).toBe(requests)
+  const messages = got.filter((r) => r.path.endsWith("/messages"))
+  expect(messages.length).toBe(1)
+  return messages[0]
 }
 
 // what the HTTP client adds on its own, whatever the plugin sets
@@ -381,15 +383,21 @@ test("a GLM Coding Plan key's request goes as the agent sent it", async () => {
 })
 
 test("a team seat's request goes as the agent sent it, ZCode's token or not", async () => {
-  const s = { site: "zai", base: "https://api.z.ai/api/anthropic", key: "team.secret", token: "tok", org: "o1", project: "p1", jwt, device: DEVICE }
+  const s = { site: "zai", base: "https://api.z.ai/api/anthropic", key: "seat.secret", token: "tok", org: "o1", project: "p1", jwt, device: DEVICE }
   const auth = { type: "oauth", access: s.key, refresh: JSON.stringify(s), expires: 0 }
-  sentAsIs(await send(auth, agentText), "team.secret", "/api.z.ai/api/anthropic/v1/messages")
+  sentAsIs(await send(auth, agentText, { requests: 2 }), "seat.secret", "/api.z.ai/api/anthropic/v1/messages")
+  expect(got.filter((r) => r.path.endsWith("/billing/balance"))).toHaveLength(1)
+  expect(got.filter((r) => r.path.endsWith("/subscription/list"))).toHaveLength(0)
+  got.length = 0
+  sentAsIs(await send({ ...auth, refresh: JSON.stringify({ ...s, jwt: "" }) }, agentText), "seat.secret", "/api.z.ai/api/anthropic/v1/messages")
+  expect(got).toHaveLength(1)
 })
 
-// magpie's provider.ZCodeStartBlockedHint, word for word
-const START_BLOCKED = "ZCode's Start Plan still turned this request away, though magpie sends it as the ZCode app does; it can be a network block of this IP, or ZCode checking for something new. Use an account with a GLM Coding Plan, or add another provider to this group"
+// magpie's provider.ZCodeRestrictedHint and provider.BlockedHint, word for word
+const START_RESTRICTED = "ZCode's risk control blocked this account for unusual activity (code 3012); it rests, and the group's other providers are used. If the ZCode app fails on this account too, only ZCode support can lift the block"
+const START_EDGE = "the provider's network firewall blocked requests from this IP; wait a while, or switch to another network or proxy"
 
-test("the Start Plan turning a request away says what to do about it, as the built-in's zcodeStartExplain did (#425)", async () => {
+test("the Start Plan's 3012 says ZCode blocked the account, and a block page the network (plugins#348, #425)", async () => {
   const ask = async (auth, url = "https://api.z.ai/api/anthropic/v1/messages") => {
     routeToFake()
     const hooks = await ZCodeAuthPlugin({ client: { auth: { set: async () => {} } } })
@@ -397,19 +405,30 @@ test("the Start Plan turning a request away says what to do about it, as the bui
     const res = await opts.fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "zcode" }, body: agentText })
     return { status: res.status, text: await res.text(), signIn: res.headers.get("x-magpie-sign-in") }
   }
-  // the block page zcode.z.ai serves: its status, then the hint, and none
-  // of the page's words, which magpie would read as a firewall's
-  answer = () => new Response("<html>Sorry, your request has been blocked due to unusual activity.</html>", { status: 405, headers: { "content-type": "text/html" } })
+  // zcode.z.ai's answer as plugins#348 has it, byte for byte: ZCode's
+  // words with the code, then what they mean, never a network block
+  answer = () => new Response('{ "code": 3012, "msg": "request has been blocked due to unusual activity.", "logid": "202610241036161d8571a39683011267ff" }', { status: 405, headers: { "content-type": "application/json" } })
   let r = await ask(start("zai"))
   expect(r.status).toBe(405)
-  expect(JSON.parse(r.text)).toEqual({ type: "error", error: { type: "permission_error", message: "405 Method Not Allowed — " + START_BLOCKED } })
-  expect(r.text).not.toMatch(/request has been blocked/)
+  expect(JSON.parse(r.text)).toEqual({ type: "error", error: { type: "permission_error", message: "request has been blocked due to unusual activity. (405, code 3012) — " + START_RESTRICTED } })
+  expect(r.text).not.toMatch(/network|IP\b|sends it as/)
   expect(r.signIn).toBe("kept")
-  // code 3012 in JSON: the vendor's own words, then the hint
+  // a bare 405 is the same block
+  answer = () => new Response("", { status: 405 })
+  r = await ask(start("zai"))
+  expect(JSON.parse(r.text).error.message).toBe("405 Method Not Allowed — " + START_RESTRICTED)
+  // code 3012 under another status: the vendor's own words, then the hint
   answer = () => Response.json({ code: 3012, msg: "method not allowed" }, { status: 403 })
   r = await ask(start("zai"))
   expect(r.status).toBe(403)
-  expect(JSON.parse(r.text).error.message).toBe("method not allowed — " + START_BLOCKED)
+  expect(JSON.parse(r.text).error.message).toBe("method not allowed (403, code 3012) — " + START_RESTRICTED)
+  // the edge firewall's block page: its status, then the network's hint,
+  // and none of the page's words
+  answer = () => new Response("<html>Sorry, your request has been blocked due to unusual activity. errors.aliyun.com</html>", { status: 405, headers: { "content-type": "text/html" } })
+  r = await ask(start("zai"))
+  expect(r.status).toBe(405)
+  expect(JSON.parse(r.text)).toEqual({ type: "error", error: { type: "permission_error", message: "405 Method Not Allowed — " + START_EDGE } })
+  expect(r.text).not.toMatch(/request has been blocked/)
   // any other refusal of the Start Plan goes on as it came
   answer = () => Response.json({ type: "error", error: { type: "overloaded_error", message: "busy" } }, { status: 529 })
   r = await ask(start("zai"))

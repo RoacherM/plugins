@@ -174,7 +174,7 @@ test('thinking controls and complete tool histories survive the desktop bridge w
       const expected = structuredClone(original);
       expected.model = 'original-provider/test-model';
       if (shared) expected.messages.splice(2, 0, {role: 'system',
-        content: '<magpie-kimi-shared-instructions>\nsynthetic shared instruction\n</magpie-kimi-shared-instructions>'});
+        content: '<shared-instructions>\nsynthetic shared instruction\n</shared-instructions>'});
       const response = await fetch(f.controller.bridgeURL + '/chat/completions', {method: 'POST',
         headers: {Authorization: 'Bearer synthetic-kimi-key'}, body: JSON.stringify(original)});
       expect(response.status).toBe(200);

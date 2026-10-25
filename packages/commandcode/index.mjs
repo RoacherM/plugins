@@ -23,7 +23,7 @@ import { createServer, STATUS_CODES } from "node:http"
 import { randomBytes, randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
 const ID = "commandcode-plan"
 const API = "https://api.commandcode.ai"
@@ -315,7 +315,9 @@ async function liveModels(key) {
 // the plan's (open) is let every model, as the CLI lets it.
 async function goModels(open = false) {
   const url = BASE + "/models"
-  const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "magpie" }, signal: AbortSignal.timeout(8_000) })
+  // the CLI asks its catalog with accept alone, under Node's fetch, whose
+  // User-Agent is "node" (installModelCatalogManager)
+  const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "node" }, signal: AbortSignal.timeout(8_000) })
   const text = await res.text()
   // catalog.FetchURL's errors
   if (res.status !== 200) {
@@ -978,14 +980,25 @@ function zdrOn(magpie) {
   return process.env.CMD_ZDR === "1"
 }
 
+// projectSlug is the CLI's x-project-slug for a working directory: its
+// last segment, "root" when it has none (getProjectDirName's slugify of
+// basename(cwd)); a Windows folder's too, as the CLI's win32 basename
+// splits it. A name a header can't carry (past Latin-1: the CLI's own
+// request fails there, Node refusing the header) goes percent-encoded.
+function projectSlug(dir) {
+  const name = basename(String(dir || homedir()).replaceAll("\\", "/")) || "root"
+  return /^[\x20-\x7e\xa0-\xff]*$/.test(name) ? name : encodeURIComponent(name)
+}
+
 // generateHeaders are the CLI's own (buildCommandAuthHeaders), with its
-// x-cmd-zdr: 1 when ZDR is on.
-const generateHeaders = (key, zdr = false) => ({
+// x-cmd-zdr: 1 when ZDR is on; the project slug is the working folder's
+// name, as the CLI's is.
+const generateHeaders = (key, zdr = false, place = {}) => ({
   "Content-Type": "application/json",
   "User-Agent": "cli",
   "x-command-code-version": CLI_VERSION,
   "x-cli-environment": "production",
-  "x-project-slug": "magpie",
+  "x-project-slug": projectSlug(place.dir),
   "x-taste-learning": "false",
   "x-session-id": session,
   Authorization: `Bearer ${key}`,
@@ -1166,7 +1179,7 @@ async function* events(body) {
 async function generate(key, chat, signal, place, zdr = false) {
   const res = await fetch(API + "/alpha/generate", {
     method: "POST",
-    headers: generateHeaders(key, zdr),
+    headers: generateHeaders(key, zdr, place),
     body: JSON.stringify(generateBody(chat, place)),
     signal,
   })
@@ -1253,7 +1266,7 @@ function providerBody(chat) {
 
 // ---- the plugin ---------------------------------------------------------------
 
-export const _internal = { subsSeen, extraSeen, waits, liveKey, failure, goModels, refuses, GO_MODELS, GO_REFUSED, zdrOn }
+export const _internal = { projectSlug, subsSeen, extraSeen, waits, liveKey, failure, goModels, refuses, GO_MODELS, GO_REFUSED, zdrOn }
 
 export async function CommandCodePlugin({ client, magpie } = {}) {
   // isGo keeps a key as Go's, for its models and endpoint: in the

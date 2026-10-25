@@ -47,8 +47,10 @@ management — if it matters, it belongs in the workspace.
 - **sim** — a local content-addressed store implementing the LayerFS
   model: immutable blobs named by SHA-256, branches as manifest
   pointers, checkpoints as deduplicated manifests, under
-  `MAGPIE_LAYERFS_HOME` (default `~/.magpie-layerfs`). It runs
-  anywhere, which is what the tests and the benchmark below use.
+  `MAGPIE_LAYERFS_HOME` (default `~/.layerfs-tools`; a
+  `~/.magpie-layerfs` from 0.7.2 or earlier is moved there once, with a
+  link left at the old path). It runs anywhere, which is what the tests
+  and the benchmark below use.
 
 **This package is sim-only.** The native backend — the real LayerFS
 through its JavaScript SDK — is developed in the standalone repo,

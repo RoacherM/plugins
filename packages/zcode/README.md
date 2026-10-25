@@ -25,12 +25,14 @@ over Anthropic's Messages API. Provider id: `zcode`.
     agent's system prompt at the end of the third (a fourth block is
     refused, #343), the day in a `<system-reminder>` turn before the agent's
     turns, and the sign-in's device id in `metadata.user_id`. GLM Coding
-    Plan and team requests go as the agent sent them. One it still turns
-    away (a 405, the block page or code 3012) comes back with what to do
-    about it, as magpie's built-in said: "ZCode's Start Plan still turned
-    this request away, though magpie sends it as the ZCode app does; …
-    Use an account with a GLM Coding Plan, or add another provider to this
-    group".
+    Plan and team requests go as the agent sent them. zcode.z.ai also
+    answers 405 code 3012 to every request of an account its risk control
+    blocked, ZCode's own app's included (plugins#348). That answer comes
+    back as ZCode's words, then "ZCode's risk control blocked this account
+    for unusual activity (code 3012); …", which magpie reads as the account
+    restricted: it rests, and the group's other providers are used. Only
+    ZCode support lifts such a block. A block page from ZCode's edge
+    firewall says this network's address was blocked instead.
   - The Start Plan's token can't be refreshed. When it runs out, sign in
     again.
 - **ZCode: a team's GLM Coding Plan**
@@ -42,6 +44,10 @@ over Anthropic's Messages API. Provider id: `zcode`.
   - It is kept as an account of its own, named `<email> (team)`, beside
     the account's own plan, so both can be used.
   - With no seat on a team's plan, it says so and signs in to nothing.
+  - The same ZCode session also reads the person's gift plans. Their
+    `<model>-Trial` entries and gift buckets appear beside the team's
+    models and allowance. Plain models spend the team plan; trial entries
+    spend the personal gift, with no fallback to the team on refusal.
 - **ZCode app's sign-in**
   - Uses the account the ZCode app on this computer is signed in to. For
     every request it reads ZCode's own credentials (`~/.zcode/v2`), so it
@@ -53,6 +59,13 @@ over Anthropic's Messages API. Provider id: `zcode`.
     another's credentials: to use both, add the app's sign-in once for each.
 - **GLM Coding Plan API key**
   - Paste a key (`<id>.<secret>`) and say which site it is from.
+  - A key reaches the GLM Coding Plan alone. ZCode's gift plans (the
+    Start Plan, ZCode 1024 Dev Day) are served to ZCode's own session,
+    which a key doesn't carry: for an account with only a gift plan, the
+    card and each refused request (1113) say to sign in with ZCode
+    instead. For an account with a GLM Coding Plan, the card says the
+    gift plans' `-Trial` models need ZCode's sign-in, since a key lists
+    none of them.
 
 ## Where the sign-in is kept
 
@@ -70,7 +83,11 @@ the ZCode app's sign-in (`refresh` then holds `"source": "zcode"`).
 ## How requests are routed
 
 Before each request, the plugin checks which plan the account is on, and
-asks again every 10 minutes:
+asks again every 10 minutes, and with every read of the usage card, so a
+plan bought, a gift claimed or a plan lapsed reaches the requests when the
+card shows it. A key whose plan list once reads no plan after reading one
+is asked again after a minute, and a Start Plan refusal on such a key reads
+the plans again on the next request:
 
 - If the key's account has a GLM Coding Plan
   (`/api/biz/subscription/list`), its requests go to that plan. A model
@@ -134,12 +151,21 @@ that fails, or lists nothing, adds no line at all, and a card that is an
 error keeps its error. Claim the plan in the ZCode app (open it once);
 the next read shows it as an ordinary gift bucket.
 
+**No ZCode session.** A card read with a key, or with a sign-in whose
+ZCode session has run out (it can't be renewed), sets aside a line named
+"ZCode gift plans (-Trial models) need ZCode's sign-in", with why in its
+display: such an account reads no gift and lists no `-Trial` entries.
+Sign in again with ZCode to get them back. A gift read that fails
+otherwise is asked again a minute later, not ten.
+
 ## Models
 
 The models are the ones ZCode offers for the account's plan. They come
 from ZCode's provider config: the release zcode.z.ai names, or an
 installed ZCode's copy if that one is newer. The list is kept for 10
-minutes. When the config can't be read, the plugin falls back to this list:
+minutes. When the config can't be read, the plugin falls back to this list
+(and magpie keeps the list it was told last, unless the account's gift
+plans add `-Trial` entries, which are told as read):
 
 | Model | Context | Output | Efforts |
 |---|---|---|---|

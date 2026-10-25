@@ -46,7 +46,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           "Gives the agent a LayerFS workspace for a project branch and answers the filesystem path to work in. " +
           "The first provision of a project imports the source directory the caller passes — source is required, there is no default — as its first checkpoint; " +
           "later provisions of the same branch answer the same path without copying the tree again (source is then ignored). " +
-          "Pass the directory the user chose for this project: magpie's config directory, credential stores (.ssh, .aws, .gnupg), the home directory and the plugin's own store are refused as sources, " +
+          "Pass the directory the user chose for this project: the app's config directory, credential stores (.ssh, .aws, .gnupg), the home directory and the plugin's own store are refused as sources, " +
           "and secret-shaped files in the tree (.env*, private keys, .git internals) never enter the store — the import skips them and reports how many. " +
           "Work in the returned path, then save progress with the checkpoint tool. " +
           "Only the returned path is persistent — work anywhere else, including the host's /tmp, is outside LayerFS management; " +
@@ -136,8 +136,8 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
       exec: {
         description:
           "Runs a shell command inside a branch's provisioned workspace and checkpoints whatever it changed as one commit: run, test, fix, all captured in the branch's history. " +
-          "DISABLED by default: the command runs with the plugin host's privileges, and magpie serves these tools to remote callers holding a gateway key, so a shell is not something a model key should silently become. " +
-          "It runs only when the user has opted in — the plugin's \"exec\" option set to true, or MAGPIE_LAYERFS_EXEC=1 in the host's environment. " +
+          "DISABLED by default: the command runs with the plugin host's privileges, and the host serves these tools to remote callers holding a gateway key, so a shell is not something a model key should silently become. " +
+          "It runs only when the user has opted in — the plugin's \"exec\" option set to true, or the exec switch in the host's environment. " +
           "A command that changes nothing commits nothing. A failing command's changes are still checkpointed (history can be rewound), and its exit code, stdout and stderr are returned. " +
           "Only the workspace path is persistent: the command runs with TMPDIR and XDG_CACHE_HOME redirected into the workspace (.tmp/ and .cache/), " +
           "workspace-local scratch that checkpoint and publish never capture, and files written to the host's real /tmp are likewise outside LayerFS management. " +
@@ -156,7 +156,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
         async execute(args) {
           if (!execEnabled()) throw new Error(
             "layerfs_exec is disabled by default: it runs shell commands with the plugin host's privileges, and these tools are reachable by any caller holding a gateway key. " +
-            "To enable it, the user sets the plugin's \"exec\" option to true in magpie's plugin options, or sets MAGPIE_LAYERFS_EXEC=1 in the plugin host's environment, and restarts the host.")
+            "To enable it, the user sets the plugin's \"exec\" option to true in the host's plugin options, or turns on the exec switch in the plugin host's environment (see the package's README), and restarts the host.")
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(opt(args.branch, "branch", "main"))
           const command = str(args.command, "command")

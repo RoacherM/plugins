@@ -29,8 +29,14 @@ const CHANNEL = "AutoClaw4";
 const CLIENT_VERSION = "1.18.1";
 const CN_CHANNEL = "AutoClaw26";
 const CN_CLIENT_VERSION = "2.1.0";
-const PLATFORM_TM = process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : "linux";
-const USER_AGENT = `AutoClaw/${CLIENT_VERSION} (${PLATFORM_TM}-${process.arch})`;
+const PLATFORM = process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : "linux";
+/** X-Tm: the official Linux client sends "linux-x64"; the overseas gateway
+ * answers the bare "linux" with 403 {"message":"forbidden"} (#367). */
+function platformTm(platform = process.platform) {
+  return platform === "darwin" ? "mac" : platform === "win32" ? "win" : "linux-x64";
+}
+const PLATFORM_TM = platformTm();
+const USER_AGENT = `AutoClaw/${CLIENT_VERSION} (${PLATFORM}-${process.arch})`;
 
 const GLOBAL_HOST = "https://autoglm-api.autoglm.ai";
 const CN_HOST = "https://autoglm-api.zhipuai.cn";
@@ -533,13 +539,28 @@ async function maybeSignin(accessToken, host, options, reason, accountKey) {
 // 用户资料（GUI 账户命名：昵称/手机号，替代无意义的 uid 哈希 → 「已登录」）
 // ---------------------------------------------------------------------------
 
+/**
+ * 账号自己的 device_id：登录时生成并随登录请求发出的那个，服务端写进了 token 的 device_id claim。
+ * 官方 AutoClaw（1.18.5 getUserInfoWithAccessToken → withWebInfo）在 user-profile 里发的就是
+ * 登录用的设备 id（getAuthState().deviceId），不是固定串。
+ */
+function accountDeviceId(deviceId, ...tokens) {
+  const given = nonEmptyString(deviceId);
+  if (given) return given;
+  for (const t of tokens) {
+    const claim = nonEmptyString(jwtClaim(t, "device_id"));
+    if (claim) return claim;
+  }
+  return "";
+}
+
 /** POST /userapi/v1/user-profile → { user_name, user_phone, user_id, … }；失败返回 null。 */
-async function fetchUserProfile(accessToken, base) {
+async function fetchUserProfile(accessToken, base, deviceId, refreshToken) {
   try {
     const res = await fetch(`${base}/userapi/v1/user-profile`, {
       method: "POST",
       headers: bizHeaders(accessToken),
-      body: JSON.stringify({ source_id: PRODUCT, device_id: "magpie-plugin" }),
+      body: JSON.stringify({ source_id: PRODUCT, device_id: accountDeviceId(deviceId, accessToken, refreshToken) }),
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
@@ -604,7 +625,7 @@ function managedHeaders(token, model) {
   const rid = randomHex(16);
   const headers = new Headers(bizHeaders());
   headers.set("Accept", "application/json");
-  headers.set("User-Agent", `AutoClaw/${CN_CLIENT_VERSION} (${PLATFORM_TM}-${process.arch})`);
+  headers.set("User-Agent", `AutoClaw/${CN_CLIENT_VERSION} (${PLATFORM}-${process.arch})`);
   headers.set("X-Channel", CN_CHANNEL);
   headers.set("X-Version", CN_CLIENT_VERSION);
   headers.set("X-Trace-Id", rid);
@@ -664,7 +685,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         // 刷新时补拉 user-profile。magpie 的 refresh 返回字段会合并进账号。
         const old = String(auth.accountId ?? auth.email ?? "");
         if (!old || /^(已登录|[0-9a-f]{24,})$/.test(old)) {
-          const profile = await fetchUserProfile(t.access, homeHost);
+          const profile = await fetchUserProfile(t.access, homeHost, jwtClaim(bareToken(auth.refresh), "device_id"), t.refresh);
           const name = accountDisplayName(profile, "");
           if (name) {
             t.accountId = name;
@@ -685,6 +706,8 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
           async fetch(input, init) {
             if (providerId !== "autoclaw-cn") {
               const headers = new Headers(init?.headers);
+              // magpie's own hint headers (x-magpie-*) are for the plugin, never the vendor
+              for (const k of [...headers.keys()]) if (k.toLowerCase().startsWith("x-magpie-")) headers.delete(k);
               headers.set("User-Agent", USER_AGENT);
               headers.set("X-Authorization", `Bearer ${accessToken}`);
               headers.set("X-Client-Type", "pc");
@@ -799,13 +822,13 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
               }]
             : [];
 
+          // 积分是纯余额，没有总量也没有已用量：只放在 balance 里。做成
+          // used: 0 的窗口，卡片会给它配上「剩余 100%」（#376）。细分钱包
+          // 一并写进 balance。
+          const parts = named.map((w) => `${w.name} ${Math.round(w.balance)}`);
           return {
-            balance: `${Math.round(total)} 积分`,
-            windows: [
-              { name: "积分余额", used: 0, display: `${Math.round(total)} 积分`, aside: true },
-              ...signinWindow,
-              ...named.map((w) => ({ name: w.name, used: 0, display: `${Math.round(w.balance)}`, aside: true })),
-            ],
+            balance: `${Math.round(total)} 积分${parts.length ? `（${parts.join(" · ")}）` : ""}`,
+            windows: signinWindow,
           };
         } catch (e) {
           if (e?.banned) return { error: e.message, signIn: "kept", windows: [] };
@@ -898,7 +921,7 @@ const phoneSmsMethod = {
         }
         const t = tokenFields(res.data);
         // GUI 显示名：拉 user-profile 取昵称/手机号（登录响应的 user_name 常为空 → 显示「已登录」）
-        const profile = await fetchUserProfile(t.access, CN_HOST);
+        const profile = await fetchUserProfile(t.access, CN_HOST, deviceId);
         const displayName = accountDisplayName(profile, phone);
         return {
           type: "success",
@@ -1155,7 +1178,7 @@ async function startLocalOAuth(vendor, openFn) {
         }
         const t = tokenFields(res.data);
         // GUI 显示名：拉 user-profile 取昵称（Google/z.ai 账号通常有昵称或邮箱）
-        const profile = await fetchUserProfile(t.access, GLOBAL_HOST);
+        const profile = await fetchUserProfile(t.access, GLOBAL_HOST, deviceId);
         const displayName = accountDisplayName(profile, `${vendor} 账号`);
         return {
           type: "success",
@@ -1325,9 +1348,9 @@ export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
 export const _internal = {
   quotaRefusal, accountRefusal, bannedSaid,
   makePluginForTest: makeAutoclawPlugin,
-  md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
+  platformTm, md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,
-  fetchUserProfile, accountDisplayName, startLocalOAuth,
+  fetchUserProfile, accountDeviceId, accountDisplayName, startLocalOAuth,
   FLAGGED, unflagged, unflag, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,
 };
