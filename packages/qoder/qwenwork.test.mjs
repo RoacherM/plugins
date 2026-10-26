@@ -331,3 +331,84 @@ test("a queued chat's status request is signed for the site", async () => {
     restore()
   }
 })
+// #385: a public-cloud personal account's account-context has quota total
+// and used null, only remaining; the pools are in /api/v1/adapter/user/wallets.
+// These are the reporter's bytes.
+const pubCred = () => ({ type: "oauth", uid: "u1", email: "bob@example.com", name: "Bob", machineId: "m1", access: "a", refresh: "r", expires: Date.now() + 3_600_000, deviceChat: true, deviceToken: "dt", deviceRefresh: "dtr" })
+const WALLETS = { active_wallets: { wallets: [{ balance: 98.6035, valid_to: "2026-10-26T00:00:00+08:00" }, { balance: 2000, valid_to: "2026-12-18T19:50:23.14+08:00" }] }, daily_credits: { total_balance: 98.6035 }, longterm_credits: { total_balance: 2000 }, monthly_credits: { total_balance: 0 } }
+const PERSONAL_QUOTA = { total: null, used: null, remaining: 2098.6336, exceeded: false }
+
+for (const [shape, wrap] of [["wrapped in data", (v) => ({ data: v })], ["bare", (v) => v]]) {
+  test(`a personal account with only what is left shows it as the balance, with each pool (${shape}, #385)`, async () => {
+    const { pub } = await load()
+    const restore = mock()
+    answer = async (url) => {
+      if (url.startsWith("https://gateway.qwenwork.cn/api/v1/adapter/user/account-context")) return new Response(JSON.stringify(wrap({ user: { id: "u1" }, plan: { name: "Free" }, quota: PERSONAL_QUOTA })), { status: 200 })
+      if (url === "https://gateway.qwenwork.cn/api/v1/adapter/user/wallets") return new Response(JSON.stringify(wrap(WALLETS)), { status: 200 })
+      return new Response("{}", { status: 404 })
+    }
+    try {
+      const usage = await pub.auth.usage(async () => pubCred())
+      expect(usage.error).toBeUndefined()
+      expect(usage.plan).toBe("Free")
+      expect(usage.balance).toBe("2098.63 credits (daily 98.6 · long-term 2000)")
+      expect(usage.windows).toBeUndefined()
+      const w = seen.find((r) => r.url.endsWith("/api/v1/adapter/user/wallets"))
+      expect(w?.headers.Authorization).toBe("Bearer dt")
+      expect(seen.some((r) => r.url.includes("/sash/"))).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+}
+
+test("a personal account's wallets that can't be read leave the balance without pools (#385)", async () => {
+  const { pub } = await load()
+  const restore = mock()
+  answer = async (url) => {
+    if (url.includes("/account-context")) return new Response(JSON.stringify({ data: { quota: PERSONAL_QUOTA } }), { status: 200 })
+    return new Response("oops", { status: 500 })
+  }
+  try {
+    const usage = await pub.auth.usage(async () => pubCred())
+    expect(usage.error).toBeUndefined()
+    expect(usage.balance).toBe("2098.63 credits")
+  } finally {
+    restore()
+  }
+})
+
+test("a personal account with nothing left is a spent window, not a share made up (#385)", async () => {
+  const { pub } = await load()
+  const restore = mock()
+  answer = async (url) => {
+    if (url.includes("/account-context")) return new Response(JSON.stringify({ data: { quota: { total: null, used: null, remaining: 0, exceeded: true } } }), { status: 200 })
+    if (url.endsWith("/wallets")) return new Response(JSON.stringify({ data: { daily_credits: { total_balance: 0 }, longterm_credits: { total_balance: 0 } } }), { status: 200 })
+    return new Response("{}", { status: 404 })
+  }
+  try {
+    const usage = await pub.auth.usage(async () => pubCred())
+    expect(usage.balance).toBe("0 credits")
+    expect(usage.windows).toEqual([{ name: "Credits", used: 100, display: "no credits left" }])
+  } finally {
+    restore()
+  }
+})
+
+test("the enterprise flagship and a biz account never read the wallets (#385)", async () => {
+  const { ent, pub } = await load()
+  const restore = mock()
+  answer = async (url) => {
+    if (url.includes("/account-context")) return new Response(JSON.stringify({ data: { user: { id: "u1", is_biz: true }, quota: { total: 100, remaining: 60 } } }), { status: 200 })
+    return new Response("{}", { status: 404 })
+  }
+  try {
+    await ent.auth.usage(async () => entCred())
+    const biz = await pub.auth.usage(async () => pubCred())
+    expect(biz.windows[0].display).toBe("40 / 100 credits")
+    expect(biz.balance).toBe("60 credits")
+    expect(seen.some((r) => r.url.includes("/wallets"))).toBe(false)
+  } finally {
+    restore()
+  }
+})

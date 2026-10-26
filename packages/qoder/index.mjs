@@ -1787,7 +1787,7 @@ class UsageStatus extends Error {
 
 // fetchUsage is the usage envelope, {displayMode, qoderUsage}; a site with
 // its own usage path (QwenWork's account-context) is read by
-// fetchSiteUsage below instead.
+// the usage hook's site.usagePath branch instead (parseAccountContext).
 async function fetchUsage(site, deviceToken) {
   if (!String(deviceToken ?? "").trim()) throw new Error("qoder usage: missing device token")
   let res
@@ -2083,28 +2083,59 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`
 // parseAccountContext reads the account-context QwenWork's sign-in already
 // reads: plan {name, next_refresh / next_due} and quota {total, used,
-// remaining} in the plan's credit unit. One window is one pool of credits.
+// remaining, exceeded} in the plan's credit unit, and the wallets
+// (/api/v1/adapter/user/wallets) where the public cloud has them: each
+// pool's total_balance (daily_credits, monthly_credits, longterm_credits).
+// That is what QwenWork's own client reads (QwenWorkCN.app 1.2.1,
+// out/main/main.js: fetchQuotaUsage, fetchUserWallets,
+// mergeWalletsIntoCreditBreakdown). A personal account's quota has total
+// and used null, so only what is left is known: that is the balance, with
+// each pool, and no share used is made up. An account with a total keeps
+// its window of used / total.
 const num = (v) => {
   const n = Number(v)
   if (!Number.isFinite(n)) return "0"
   return String(Math.round(n * 100) / 100)
 }
-const parseAccountContext = (ctx) => {
-  const data = ctx?.data ?? {}
-  const q = data.quota
+// the client's unwrapAdapterResponse: the envelope's data object, else the
+// envelope itself
+const unwrap = (v) => (v?.data && typeof v.data === "object" && !Array.isArray(v.data) ? v.data : (v && typeof v === "object" ? v : {}))
+const finite = (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
+const POOLS = [["daily_credits", "daily"], ["monthly_credits", "monthly"], ["longterm_credits", "long-term"]]
+const walletPools = (w) => {
+  const d = unwrap(w)
+  const out = []
+  for (const [key, name] of POOLS) {
+    const p = d[key]
+    const b = p && typeof p === "object" ? finite(p.total_balance ?? p.totalBalance) : undefined
+    if (b !== undefined && b > 0) out.push(`${name} ${num(b)}`)
+  }
+  return out
+}
+const parseAccountContext = (ctx, wallets) => {
+  const data = unwrap(ctx)
+  const q = data.quota && typeof data.quota === "object" && !Array.isArray(data.quota) ? data.quota : null
   const out = {}
   if (data.plan?.name) out.plan = String(data.plan.name)
   const refresh = data.plan?.next_refresh_date ?? data.plan?.next_due_date
   if (refresh) out.until = new Date(refresh).toISOString()
-  if (q && typeof q === "object") {
-    const total = Number(q.total)
-    const remaining = Number(q.remaining)
-    const used = Number.isFinite(Number(q.used)) ? Number(q.used) : total - remaining
-    if (Number.isFinite(total) && total > 0 && Number.isFinite(used) && used >= 0) {
+  if (q) {
+    const total = finite(q.total)
+    const remaining = finite(q.remaining)
+    const used = finite(q.used) ?? (total !== undefined && remaining !== undefined ? total - remaining : undefined)
+    if (total !== undefined && total > 0 && used !== undefined && used >= 0) {
       out.windows = [{ name: "Credits", used: Math.min(100, (100 * used) / total), display: `${num(used)} / ${num(total)} credits` }]
     }
+    if (remaining !== undefined) {
+      const pools = wallets ? walletPools(wallets) : []
+      out.balance = `${num(remaining)} credits${pools.length ? ` (${pools.join(" · ")})` : ""}`
+      // nothing left stops the account: say so as a spent window, since
+      // there is no total to show a share of
+      const exceeded = q.exceeded === true || q.is_quota_exceeded === true || q.isQuotaExceeded === true || remaining <= 0
+      if (!out.windows && exceeded) out.windows = [{ name: "Credits", used: 100, display: "no credits left" }]
+    }
   }
-  if (!out.windows) out.error = "QwenWork: the account reports no credits"
+  if (!out.windows && out.balance === undefined) out.error = "QwenWork: the account reports no credits"
   return out
 }
 
@@ -2162,6 +2193,9 @@ const SITES = {
     ...QWENWORK_COMMON,
     id: "qwenwork",
     name: "QwenWork",
+    // the public cloud's personal accounts have wallets; the client asks
+    // for them beside the account-context, and not for an enterprise one
+    walletsPath: "/api/v1/adapter/user/wallets",
     web: "https://gateway.qwenwork.cn",
     openapi: "https://gateway.qwenwork.cn",
     api: "https://gateway.qwenwork.cn",
@@ -2338,9 +2372,9 @@ const makePlugin = (site) => async ({ client }) => {
       // like any other call and answered with its own envelope) is read
       // there; a 401 rotates the device token once, as the qoder path does
       if (site.usagePath) {
-        const read = async (token) => {
+        const read = async (token, path = site.usagePath) => {
           const s = siteOf(site, cred)
-          const res = await fetch(`${s.openapi}${site.usagePath}`, {
+          const res = await fetch(`${s.openapi}${path}`, {
             headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
             signal: AbortSignal.timeout(20_000),
           })
@@ -2348,14 +2382,23 @@ const makePlugin = (site) => async ({ client }) => {
           return res.json()
         }
         let env
+        let token = cred.deviceToken ?? cred.access
         try {
-          env = await read(cred.deviceToken ?? cred.access)
+          env = await read(token)
         } catch (e) {
           if (!(e instanceof UsageStatus) || (e.status !== 401 && e.status !== 403)) throw e
           if (!cred.deviceToken) throw e
-          env = await read(await deviceToken(getAuth, cred.deviceToken))
+          token = await deviceToken(getAuth, cred.deviceToken)
+          env = await read(token)
         }
-        return { ...(site.parseUsage ? site.parseUsage(env) : { windows: [] }), signIn }
+        // the pools behind the balance, as the client asks for a personal
+        // account's; a failed read leaves the balance without them
+        let wallets
+        const ctxUser = (env?.data ?? env)?.user
+        if (site.walletsPath && ctxUser?.is_biz !== true && ctxUser?.isBiz !== true) {
+          try { wallets = await read(token, site.walletsPath) } catch {}
+        }
+        return { ...(site.parseUsage ? site.parseUsage(env, wallets) : { windows: [] }), signIn }
       }
       // A PAT account has no device token: the usage endpoint takes the job
       // token the exchange gave — a live PAT account answered 200 with a

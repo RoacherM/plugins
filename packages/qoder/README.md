@@ -271,6 +271,12 @@ on this same protocol, with the desktop client's client id, an RSA key the
 Qoder one's equal, its own `qwork` scene, and the device token as the chat
 token. The public cloud's sign-in is the desktop app's device flow, with
 `redirect_uri=qwenwork-cn://`; usage reads the sign-in's account-context.
+A personal account's quota there has `total` and `used` null, only
+`remaining`, so the card shows what is left as its balance, with each pool
+(daily, monthly, long-term) from `/api/v1/adapter/user/wallets`, as
+QwenWork's own client reads them; no share used is made up. An account
+with a total keeps its used / total window, and a biz account (or the
+enterprise flagship) never asks for the wallets.
 There is no PAT and no daily check-in on it: the `pat: false` and
 `checkin: false` site fields turn both off, so Qoder's device identity is
 never sent there.

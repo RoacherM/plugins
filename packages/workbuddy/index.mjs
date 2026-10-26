@@ -1719,6 +1719,26 @@ function runsOutOf(sum, packages, now = Date.now()) {
   return at ? { runsOutAt: new Date(at).toISOString(), runsOut: amount } : null
 }
 
+// cycleOf is when the plan's credits start again, as WorkBuddy's own client
+// says it (getCurrentPlan's refreshAt): the cycle end of the package the
+// summary names as the subscription (SubscriptionPackageCode), in UTC+8,
+// with how long the cycle is. Without it the card had used credits and no
+// reset, and magpie said "Not used yet" beside 46% (windy on Discord,
+// 2026-10-26). null when the subscription isn't in the lists, or its cycle
+// is over.
+function cycleOf(sum, packages, now = Date.now()) {
+  const code = sum?.SubscriptionPackageCode
+  if (!code) return null
+  const at = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v.trim()) ? Date.parse(v.trim().replace(" ", "T") + "+08:00") : 0)
+  for (const p of packages ?? []) {
+    if (p?.PackageCode !== code) continue
+    const end = at(p?.CycleEndTime), start = at(p?.CycleStartTime)
+    if (!(end > now)) continue
+    return { resetsAt: new Date(end).toISOString(), ...(start > 0 && start < end ? { span: (end - start) / 1000 } : {}) }
+  }
+  return null
+}
+
 // ---- models -----------------------------------------------------------------
 
 // variants are the reasoning levels as OpenCode gives them to the AI SDK.
@@ -2159,12 +2179,14 @@ function makePlugin(site) {
             } catch {}
             if (ent) return { plan: auth.plan || "Enterprise", windows: await spareFree(site, a, [ent]), signIn: said }
           }
-          // when the credits left run out, for routing to spend them first;
+          // when the plan's credits start again (cycleOf), and when the credits
+          // left run out, for routing to spend them first (runsOutOf);
           // a list that can't be read leaves it unknown, the card stands
           const credits = out.windows.find((w) => w.name === "Credits")
           if (credits) {
             try {
-              Object.assign(credits, runsOutOf(sum, await packagesOf(site, a)) ?? {})
+              const packages = await packagesOf(site, a)
+              Object.assign(credits, cycleOf(sum, packages) ?? {}, runsOutOf(sum, packages) ?? {})
             } catch {}
           }
           await spareFree(site, a, out.windows)
@@ -2291,4 +2313,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
