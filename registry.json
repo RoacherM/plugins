@@ -1,6 +1,8 @@
 {
   "version": 1,
   "plugins": [
+    { "package": "@magpie-community/opencode-copilot-auth", "name": "GitHub Copilot", "providers": ["github-copilot"], "community": true,
+      "summary": { "en": "GitHub Copilot on GitHub.com or GitHub Enterprise, with premium request or credit usage, remaining allowance and quota reset dates.", "zh": "GitHub Copilot：支持 GitHub.com 与 GitHub Enterprise，显示高级请求或积分用量、剩余额度和重置时间。" } },
     { "package": "@magpie-community/opencode-joycode-auth", "name": "JoyCode", "providers": ["joycode"], "community": true,
       "summary": { "en": "Unofficial JoyCode provider: JD account browser sign-in, live models and credit multipliers, plan credits and streaming tool calls.", "zh": "非官方 JoyCode 插件：京东账号浏览器登录，动态模型与积分倍率、套餐额度及流式工具调用。" } },
     {"package": "@magpie-community/opencode-kimi-work-auth", "name": "Kimi Work", "icon": "kimi", "providers": ["kimi-work"], "community": true, "summary": {"en": "Kimi desktop Work subscription through its local sign-in, with live Work models and shared membership usage. Separate from Kimi Code.", "zh": "使用本机普通 Kimi 桌面版的 Work 登录，自动读取 Work 模型和会员共享用量；独立于 Kimi Code。"}},
@@ -56,6 +58,8 @@
       "summary": { "en": "New API's sensitive-word filter: turn away or mask words and patterns in what you send, and in replies.", "zh": "New API 的敏感词过滤：拒绝或替换你发出的内容和回复里的词与正则。" } },
     { "package": "@magpie-community/middleware-think-tags", "name": "Think Tags", "kind": "middleware", "community": true,
       "summary": { "en": "Take a model's <think>…</think> out of its reply's text, or put a Chat reply's reasoning into it.", "zh": "去掉回复正文开头的 <think>…</think>，或把 Chat 回复的思考内容放进正文。" } },
+    { "package": "@magpie-community/agent-kilo", "name": "Kilo Code", "kind": "agent", "community": true, "icon": "https://github.com/Kilo-Org.png",
+      "summary": { "en": "Kilo Code (kilo.ai) on magpie's Agents page: pick one of magpie's models for it, and switch it off to put its config back.", "zh": "把 Kilo Code（kilo.ai）加到 magpie 的 Agent 页：选择 magpie 的模型，关掉即恢复原来的配置。" } },
     { "package": "@magpie-community/middleware-antigravity-cloak", "name": "Antigravity Cloak", "kind": "middleware", "community": true,
       "summary": { "en": "Claude Code and Claude Desktop on an Antigravity account: the words Antigravity refuses their system prompt for are broken up, in what Antigravity alone is sent.", "zh": "让 Claude Code 和 Claude Desktop 能用 Antigravity 账号：只在发给 Antigravity 的请求里拆开它据以拒绝系统提示词的那几个词。" } },
     { "package": "@magpie-community/middleware-codex-history", "name": "Codex History Filter", "kind": "middleware", "community": true,

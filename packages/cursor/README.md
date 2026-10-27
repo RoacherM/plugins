@@ -197,6 +197,24 @@ minutes), the way pi-cursor-sdk lists Cursor's catalog:
   has. A model the usable list has nothing of is the picker's alone
   (GLM-5.3) and is kept whole; so is every model when Cursor can't give
   the usable list.
+- A family the usable list has and the picker doesn't (an account whose
+  picker lacks Claude Opus 5.5 while `cursor-agent models` lists
+  `claude-opus-5-5-low` to `-max`) is listed once under its family id
+  (`claude-opus-5-5`), its efforts as variants, and goes as the usable id
+  those parameters pick, never as the family id Cursor doesn't know. A
+  picker model whose chosen variant isn't one the account can use goes as
+  its family's nearest usable id the same way. Such a family is named
+  without the tier Cursor's names carry ("Claude Opus 5 1M Medium
+  Thinking" is listed as Claude Opus 5 Thinking): the tier is the
+  reasoning level the agent asks for (low to max, as the account has
+  them), fast the request's `service_tier`.
+- An id for a model with thinking that the account lists only without it
+  (`claude-haiku-5-5-thinking` when the list has Claude Haiku 5.5 alone),
+  or the other way round, runs as the model the account has.
+- An `@<size>` id the list no longer has (`claude-opus-5-5@1m` when only
+  300k is listed, or the model is listed unsized) runs at the model's
+  nearest size, in Max Mode when the size asked for is over the model's
+  window, never as the literal `@<size>` id.
 - An id from before 0.2.0 still runs. A variant's own id
   (`claude-opus-5-5-high`) is that variant; a family 0.1.x listed
   (`claude-opus-5-5`, `claude-opus-5-5-fast`, `claude-haiku-5-5-thinking`,

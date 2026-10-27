@@ -25,11 +25,13 @@ Every reasoning-effort value returned by `/models` is retained, including `STAND
 
 ## Sign-in and local files
 
-The plugin reads only the desktop app's `daimon-share/daimon/config.json` under:
+The plugin reads only the desktop app's `daimon/config.json` in its `daimon-share` folder. That folder is where Kimi's own `daimon-storage.json` points (`shareDir`), or, with no such file, `daimon-share` itself, in Kimi's data folder:
 
 - Windows: `%APPDATA%/kimi-desktop/`
 - macOS: `~/Library/Application Support/kimi-desktop/`
 - Linux: `~/.config/kimi-desktop/`
+
+Kimi 3.2.21 on Windows, installed on another drive than `%APPDATA%`'s, keeps it there (`D:\KimiData\daimon-share` for an install on D:), and Kimi writes the same pointer on any system when its storage is moved. When the sign-in can't be found, the error names the file it looked for.
 
 The internal Work credential is named `credentials.kimiCode`, but its origin must be exactly `https://agent-gw.kimi.com/coding/v1`. `credentials.kimiWeb` supplies the membership sign-in. The plugin rejects missing credentials and other origins. It saves only a hashed account reference in Magpie/OpenCode's auth store; the actual tokens remain in Kimi's own file and are reread on each operation. It never reads Magpie's credential files, writes Kimi configuration, consumes refresh tokens, or stores copies of desktop credentials.
 

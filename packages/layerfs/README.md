@@ -84,22 +84,23 @@ defaults here are set for that room, not for a private library:
   past it.
 - **Secret-shaped files never enter the store from an import**:
   `.git`, `.env*`, private keys (`id_rsa`, `id_ed25519`, `*.pem`,
-  `*.key`, …), `.ssh`, `.aws`. The import skips them and reports how
-  many. Imports are also bounded (20,000 files / 512 MiB) and fail
-  loudly past the limit instead of sweeping a disk.
+  `*.key`, …), `.ssh`, `.aws`. The sim backend skips them and reports
+  how many. Imports are
+  also bounded (20,000 files / 512 MiB) and fail loudly past the limit
+  instead of sweeping a disk.
 - **The store is private.** Its root and directories are created
   `0700`, its record files `0600`, whatever the umask says; a file's
-  own mode is preserved through the store (a `0600` file is stored
+  own mode is preserved through the sim store (a `0600` file is stored
   and materialized as `0600`).
 - **`exec` is disabled by default.** It runs a shell with the plugin
   host's privileges; a model key should not silently become host
   shell access. The user enables it with the plugin's `"exec"`
   option (set to `true` in magpie's plugin options) or
   `MAGPIE_LAYERFS_EXEC=1` in the host's environment.
-- **Re-provisioning never wipes a workspace.** When a branch has
-  moved since its workspace was materialized, provision keeps the
-  workspace's files and reports `stale: true` instead of deleting
-  uncheckpointed work.
+- **Re-provisioning a moved branch keeps the workspace.** When a
+  branch has moved since its checkout, re-provisioning keeps the
+  workspace's files and reports `stale: true` instead of wiping the
+  directory.
 
 ## Benchmark
 
@@ -124,9 +125,15 @@ per-agent copy, the per-snapshot copy, and the bytes they waste — the
 engine's own benchmarks are at
 [layerfs.ai/benchmarks](https://layerfs.ai/benchmarks/).
 
-The same scenario against the real engine (the native backend, in
-the standalone repo): the engine's store file held **5.6 MB for
-513 MB of logical checkpoints** on a compressible text fixture —
+Against the real engine
+([`bench/bench-native.mjs`](https://github.com/Mola-maker/magpie-layerfs/blob/main/bench/bench-native.mjs),
+native backend, same scenario, generated-text fixture of 184 files /
+27.0 MB): import
+3.6 s once; a fork plus its checkout 1.8 s (the branch itself is
+metadata; the checkout pays the file reads); a checkpoint 1.9 s (the
+checkout diff reads the branch back through the fs surface, then one
+`fs.apply` lands it); the engine's store file held **5.6 MB for
+513 MB of logical checkpoints** on this compressible text fixture —
 the sim fixture above is random bytes, the incompressible extreme, so
 read the two ratios as the ends of a range, not a single number.
 
@@ -176,35 +183,79 @@ and its test asserts it asks for none.
 
 ## Develop
 
-From a checkout of
-[magpie-community/plugins](https://github.com/magpie-community/plugins),
-in `packages/layerfs`:
+From a checkout of [this repo](https://github.com/Mola-maker/magpie-layerfs)
+(the registry package ships only the runtime files):
 
 ```sh
 bun test                 # the suite (bun:test): tools end to end, plus the page's layout math
+bun bench/bench.mjs      # the benchmark above; writes bench/results.json
+node tools/gen-trajectory.mjs   # regenerate the page's bundled sample trajectory
 ```
-
-The benchmark above and the sample-trajectory generator live in the
-standalone repo,
-[Mola-maker/magpie-layerfs](https://github.com/Mola-maker/magpie-layerfs),
-which is also where the native backend is developed.
 
 Zero runtime dependencies; the arguments are JSON Schema, like the other
 tools packages. MIT.
+
+## Changes in 0.9.0
+
+The registry package is sim-only now. The native backend — the
+standalone repo's LayerFS 1.1.0 port, with the SDK split into
+`@layerfs/agent`, `@layerfs/backend` and `@layerfs/runtime`, the
+`LayerFS.open` / `LayerFS.init` factories and the child-process
+worker — stays in the standalone repo until the SDK is published
+to npm and this package can pin it; the registry review asked for
+the native path to stay out until then, so `native-worker.mjs`
+and the fake SDK are gone from this package, the `"native"` plugin
+option is gone, and a native request is refused instead of
+silently running sim.
+
+The page's live file is gone with it: the registry review asked
+for no writes into the installed plugin's folder, so the tools no
+longer write `page/trajectory-live.js` at runtime and the page is
+back to the bundled sample (the 0.7.1 position — a magpie page
+cannot read plugin-private data, and the bridge's reads are a
+fixed host list). The live trajectory stays available through the
+tools and through `backend.trajectory()`, which now caches every
+commit's summary (everything but the manifest, which it never
+uses) per project/id: a rebuild reads only commits it has never
+seen, and a rebuild with nothing new reads no records at all (a
+test counts the reads to pin that). Between branches the walk
+yields, so even a first build over a large store never holds the
+shared plugin host's event loop for its whole duration.
+
+## Changes in 0.8.0
+
+0.8.0 gave the page the real trajectory. The 0.7.x page could only
+animate the bundled sample — a magpie page cannot fetch, and the
+bridge's reads are a fixed host list — so the live picture the tools
+held never reached it. The channel was there all along, though:
+magpie serves a page's files from the plugin's folder as they sit on
+disk, per request. So:
+
+- **The page's live file.** After any provision, fork, checkpoint,
+  publish or exec lands, the tools rebuild the trajectory on demand
+  (`backend.trajectory()`) and write it, tmp-then-renamed, to
+  `page/trajectory-live.js` in the plugin's own folder — debounced,
+  off the tool calls' path, errors swallowed (the page keeps its
+  last file; the calls are untouched). The page loads it after the
+  bundled sample and prefers it. An empty store writes an empty
+  live file, and the page shows its honest empty state instead of
+  the demo; the sample remains what a store the tools have never
+  written shows.
+  Registry review (PR #365) asked for no writes into the installed
+  plugin's folder, so 0.9.0 removes the live file again and the
+  page is back to the bundled sample.
+- **The real agent on every commit.** The tools record the calling
+  agent — the tool host's `ctx.agent`, the gateway's name for the
+  agent that made the call — on the events and commits each call
+  creates. The page prefers it over the branch-name token guess: a
+  claude badge lands where claude actually checkpointed, even on
+  `main`, and the detail card names the agent.
 
 ## Changes in 0.7.1
 
 The second round of the PR #318 review — the holes it found in
 0.7.0's own new code, plus its smaller items:
 
-- **This package is sim-only.** The native backend was removed from
-  the magpie-community package (the review's condition for keeping
-  it — a pinned, integrity-checked npm dependency — cannot exist
-  while `@layerfs/sdk` is not on npm). It lives in the standalone
-  repo and returns in a follow-up PR once the SDK is published with
-  a version to pin; asking for it here is an explicit error.
-  `package.json`'s `repository` now names this repo, with
-  `"directory": "packages/layerfs"`, like every other package here.
 - **The source guard compares real paths now.** 0.7.0 compared
   `resolve()`d strings, which a symlink to a refused directory — or
   a case-variant spelling of one on a case-insensitive volume —

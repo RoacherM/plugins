@@ -735,12 +735,89 @@ function served(m, ids) {
   return got.some((v) => v.legacySlug) ? got : vs
 }
 
+// familyOf is the family one of Cursor's own ids is of, fast or not:
+// claude-opus-5-5-low-fast is of claude-opus-5-5, at low, fast.
+function familyOf(id) {
+  let [family, effort] = splitID(id)
+  const fast = family.endsWith("-fast") && family.length > "-fast".length
+  if (fast) family = family.slice(0, -"-fast".length)
+  return { family, effort, fast }
+}
+
+// familiesOf is the usable list (GetUsableModels, what cursor-agent models
+// shows: claude-opus-5-5-low, claude-opus-5-5-low-fast, …) by family: each
+// id with its effort, whether it is fast, whether Cursor runs it in Max
+// Mode, and its name.
+function familiesOf(listed) {
+  const fams = new Map()
+  for (const u of listed ?? []) {
+    const id = String(u?.modelId ?? "")
+    if (!id) continue
+    const { family, effort, fast } = familyOf(id)
+    if (!fams.has(family)) fams.set(family, [])
+    fams.get(family).push({ id, effort, fast, maxMode: u.maxMode === true, name: clean(u.displayName || id) })
+  }
+  return fams
+}
+
+// fromUsable is the id of a family of the usable list's that a request
+// runs as: fast as asked (when the family has both), at the effort asked or
+// the nearest it has; with none asked, the one without an effort in its
+// id, else medium, as Cursor's default is (claude-opus-5-5-medium), else
+// the first.
+function fromUsable(fam, effort, fast) {
+  let vs = fam.filter((u) => u.fast === !!fast)
+  if (!vs.length) vs = fam
+  if (effort === "off") effort = "none"
+  const at = effort ? fitEffort(effort, vs.map((u) => u.effort).filter(Boolean)) : ""
+  return (at && vs.find((u) => u.effort === at)) || vs.find((u) => u.effort === "") || vs.find((u) => u.effort === "medium") || vs[0]
+}
+
+// usableTitle is a usable id's name without what the id says apart: its
+// effort, fast, and the 1M Cursor names every Max-capable Claude with
+// ("Claude Opus 5.5 1M Low" is Claude Opus 5.5), wherever Cursor puts
+// them: "Claude Opus 5 1M Medium Thinking" is Claude Opus 5 Thinking, as
+// its efforts are magpie's reasoning levels and not models of their own
+// (ysm119 on Discord read "Medium" in the name as the only tier). A word
+// of the model's own name stays: GPT-5.1 Codex Max at high is "GPT-5.1
+// Codex Max".
+const EFFORT_WORDS = { none: ["None"], minimal: ["Minimal"], low: ["Low"], medium: ["Medium"], high: ["High"], xhigh: ["Extra High", "XHigh"], max: ["Max"] }
+function usableTitle(u) {
+  const ws = u.name.split(" ")
+  // the last time a phrase is said, past the name's first word
+  const cutLast = (phrase) => {
+    const p = phrase.toLowerCase().split(" ")
+    for (let i = ws.length - p.length; i >= 1; i--) {
+      if (p.every((w, k) => ws[i + k].toLowerCase() === w)) {
+        ws.splice(i, p.length)
+        return true
+      }
+    }
+    return false
+  }
+  for (const p of EFFORT_WORDS[u.effort] ?? []) if (cutLast(p)) break
+  if (u.fast) cutLast("fast")
+  return ws.filter((w, i) => i === 0 || !/^\(?1m\)?$/i.test(w)).join(" ") || u.name
+}
+
 // modelsOf is the picker's models as offered: one entry for each context
 // size a model has, or one with Cursor's limit when it has none. A model
 // served in part is offered at the sizes and efforts it is served at.
-function modelsOf(picker, ids) {
+// listed is the usable list: a family of its ids the picker has nothing of
+// (a Team's picker can leave out what cursor-agent models lists, magpie
+// #3150 ysm119 on Discord) is offered too, once, with its efforts, and each
+// entry keeps its family's usable ids, so a request goes as one of those
+// and never as a name Cursor would answer "AI Model Not Found".
+function modelsOf(picker, ids, listed = []) {
   const out = []
   const used = new Set()
+  const fams = familiesOf(listed)
+  // every id the picker names at all, shown or left out
+  const named = new Set()
+  for (const m of picker) {
+    if (!m?.name) continue
+    for (const x of [m.name, ...(m.legacySlugs ?? []), ...(m.idAliases ?? []), ...(m.variants ?? []).map((v) => v.legacySlug)]) if (x) named.add(x)
+  }
   for (const m of picker) {
     if (!m?.name || m.isHidden || m.isChatOnly || m.onlySupportsCmdK || m.supportsAgent === false || PICKER_SKIP.has(m.name)) continue
     const defs = paramDefs(m)
@@ -750,7 +827,8 @@ function modelsOf(picker, ids) {
     const def = defaultVariant({ variants })
     const { pid, levels: all } = effortsOf(defs)
     const levels = Object.fromEntries(Object.entries(all).filter(([, value]) => has(pid, value)))
-    const base = { run: m.name, title: clean(m.clientDisplayName || m.name), pid, levels, fast: !!defs.fast?.length, variants, def, partial, model: m }
+    const fam = fams.get(familyOf(def?.legacySlug || m.name).family) ?? []
+    const base = { run: m.name, title: clean(m.clientDisplayName || m.name), pid, levels, fast: !!defs.fast?.length, variants, def, partial, model: m, fam, ids }
     const contexts = (defs.context ?? []).filter((c) => has("context", c))
     if (contexts.length) {
       for (const c of contexts) {
@@ -764,6 +842,15 @@ function modelsOf(picker, ids) {
       const limit = needsMax(m, def) ? m.contextTokenLimitForMaxMode || m.contextTokenLimit : m.contextTokenLimit
       out.push({ ...base, id: m.name === "default" ? "auto" : m.name, name: base.title, context: limit > 0 ? limit : DEFAULT_CONTEXT, size: "", offersFast: fastAt(variants, "") })
     }
+  }
+  for (const [family, fam] of fams) {
+    if (fam.some((u) => named.has(u.id)) || named.has(family) || used.has(family)) continue
+    used.add(family)
+    const levels = Object.fromEntries(fam.filter((u) => LEVEL_RANK.includes(u.effort)).map((u) => [u.effort, u.effort]))
+    const def = fromUsable(fam, "", false)
+    // Cursor's context for it isn't known: its default's, as for a model
+    // the picker gives no limit for
+    out.push({ id: family, run: family, name: usableTitle(def), title: usableTitle(def), pid: "", levels, fast: false, variants: [], def: undefined, partial: false, model: { name: family }, fam, ids, usableOnly: true, context: DEFAULT_CONTEXT, size: "", offersFast: fam.some((u) => u.fast) })
   }
   return out
 }
@@ -797,6 +884,11 @@ function nearest(vs, want) {
 // variant the account has. seed is the variant an id of Cursor's own named
 // (request), in the default's place.
 function pick(entry, effort, fast, seed) {
+  // a family the usable list has and the picker doesn't: its own id
+  if (entry.usableOnly) {
+    const u = fromUsable(entry.fam, effort, fast)
+    return { id: u.id, params: [], maxMode: u.maxMode }
+  }
   const def = entry.def
   const want = { ...valuesOf(seed ?? def) }
   if (entry.size) want.context = entry.size
@@ -824,6 +916,14 @@ function pick(entry, effort, fast, seed) {
   // cursor-agent models lists it: claude-opus-5-5-high), not the picker's
   // model name; the default's when no variant matched
   const id = v?.legacySlug || def?.legacySlug || entry.run
+  // an id the usable list doesn't have, when it has the family's (a
+  // picker model without variants goes by its name, claude-opus-5-5,
+  // which Cursor doesn't serve): the family's usable id at the effort
+  if (entry.ids && !entry.ids.has(id) && entry.fam?.length) {
+    const level = entry.pid && entry.pid !== "thinking" ? String(want[entry.pid] ?? "").replace("extra-high", "xhigh") : ""
+    const u = fromUsable(entry.fam, effort || level, fast)
+    return { id: u.id, params: [], maxMode: maxMode || u.maxMode }
+  }
   return { id, params, maxMode }
 }
 
@@ -878,17 +978,15 @@ async function usable(tok) {
   const h = createHash("sha256").update(tok).digest("hex")
   const had = lists.get(h)
   if (had && Date.now() - had.at < MODELS_KEEP) return had.raw
-  const [j, ids] = await Promise.all([
+  const [j, listed] = await Promise.all([
     unary(API, "aiserver.v1.AiService/AvailableModels", tok, { useModelParameters: true, doNotUseMarkdown: true }, 30_000),
     unary(API, "agent.v1.AgentService/GetUsableModels", tok, {}, 8_000).then(
-      (u) => {
-        const ids = new Set((u?.models ?? []).flatMap((m) => [m.modelId, m.displayModelId]).filter(Boolean))
-        return ids.size ? ids : null
-      },
-      () => null,
+      (u) => (Array.isArray(u?.models) ? u.models : []),
+      () => [],
     ),
   ])
-  const raw = modelsOf(Array.isArray(j?.models) ? j.models : [], ids)
+  const ids = new Set(listed.flatMap((m) => [m?.modelId, m?.displayModelId]).filter(Boolean))
+  const raw = modelsOf(Array.isArray(j?.models) ? j.models : [], ids.size ? ids : null, listed)
   if (!raw.length) throw new Error("Cursor listed no models")
   lists.set(h, { at: Date.now(), raw })
   return raw
@@ -921,7 +1019,47 @@ function named(raw, id) {
   }
   for (const e of models) {
     const m = e.model
+    if (e.usableOnly) continue
     if ([m.name, ...(m.legacySlugs ?? []), ...(m.idAliases ?? [])].includes(id)) return { entry: at(e, e.def), seed: undefined, effort: "", fast: false }
+  }
+  // one of the usable list's own ids, or a family of them, that the picker
+  // has nothing of: that family at the id's effort, fast when it is
+  const of = familyOf(id)
+  for (const e of models) {
+    if (!e.usableOnly) continue
+    const u = e.fam.find((x) => x.id === id)
+    if (u) return { entry: e, seed: undefined, effort: u.effort, fast: u.fast }
+    if (e.id === of.family) return { entry: e, seed: undefined, effort: of.effort, fast: of.fast }
+  }
+  // a family neither has, where the account has the same model with
+  // thinking or without it (claude-haiku-5-5-thinking, which 0.1.x listed,
+  // on a Team account whose list has Claude Haiku 5.5 without a thinking
+  // id; ysm119 on Discord): that one, at the id's effort, never the id as
+  // it is, which Cursor answers "AI Model Not Found"
+  const loose = (f) => f.replace(/-thinking$/, "")
+  const key = loose(of.family)
+  for (const e of models) {
+    if (e.usableOnly) {
+      if (loose(e.id) === key) return { entry: e, seed: undefined, effort: of.effort, fast: of.fast }
+      continue
+    }
+    const vs = e.variants.filter((v) => v.legacySlug && loose(familyOf(v.legacySlug).family) === key)
+    if (vs.length) return as(e, vs, of.effort)
+  }
+  // an id at a context size the list no longer has (claude-opus-5-5@1m,
+  // picked from an earlier list, or from another account's): the model at
+  // the nearest size it has; a model listed without sizes, in Max Mode for
+  // a size over its window
+  const sized = /^(.+)@([^@]+)$/.exec(id)
+  if (sized) {
+    const want = tokensOf(sized[2])
+    const same = raw.filter((e) => e.run === sized[1] && e.size)
+    if (same.length) {
+      const near = same.reduce((a, b) => (Math.abs(tokensOf(b.size) - want) < Math.abs(tokensOf(a.size) - want) ? b : a))
+      return { entry: near, seed: undefined, effort: "", fast: false }
+    }
+    const old = named(raw, sized[1])
+    if (old) return { ...old, max: !old.entry.size && want > old.entry.context }
   }
   return null
 }
@@ -933,8 +1071,17 @@ function named(raw, id) {
 function request(raw, model, effort, fast) {
   const entry = raw.find((m) => m.id === model)
   if (entry) return pick(entry, effort, fast)
+  const bare = raw.find((m) => m.id === model.replace(/@[^@]*$/, ""))
+  if (bare && model !== bare.id && !bare.size) {
+    // a model now listed without sizes, asked at one
+    const r = pick(bare, effort, fast)
+    return tokensOf(model.split("@").at(-1)) > bare.context ? { ...r, maxMode: true } : r
+  }
   const old = named(raw, model)
-  if (old) return pick(old.entry, effort || old.effort, fast || old.fast, old.seed)
+  if (old) {
+    const r = pick(old.entry, effort || old.effort, fast || old.fast, old.seed)
+    return old.max ? { ...r, maxMode: true } : r
+  }
   return { id: model === "auto" ? "default" : model, params: [], maxMode: false }
 }
 

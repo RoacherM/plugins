@@ -47,10 +47,7 @@ async function simTools(opts = { exec: true }) {
   const home = mkTmp("layerfs-home-")
   process.env.MAGPIE_LAYERFS_HOME = home
   process.env.MAGPIE_LAYERFS_BACKEND = "sim"
-  delete process.env.LAYERFS_SDK_PATH
-  delete process.env.LAYERFS_STORE_PATH
   delete process.env.MAGPIE_LAYERFS_EXEC
-  delete process.env.MAGPIE_LAYERFS_NATIVE
   const src = fixture()
   // ctx.directory is magpie's CONFIG directory in the real host — the
   // harness models it as its own temp dir, never the source
@@ -343,42 +340,90 @@ test("item 4: the store is private, and a file's mode survives the store", async
   expect(mode(join(home, "accounting.json"))).toBe(0o600) // record files stay private
 })
 
-test("r2 item 4: this package is sim-only — asking for the native backend is a clear error", async () => {
-  const sim1 = await createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-auto-") })
-  expect(sim1).toBeInstanceOf(SimBackend)
-  // an SDK path changes nothing here: auto still means sim
-  const sim2 = await createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-auto-"), LAYERFS_SDK_PATH: "/x/index.js" })
+test("the registry package ships the sim backend only; native is refused, never silently substituted", async () => {
+  const sim = await createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-sim-") })
+  expect(sim).toBeInstanceOf(SimBackend)
+  // an SDK path lying around changes nothing: there is no native backend to turn on
+  const sim2 = await createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-sim-"), LAYERFS_SDK_PATH: "/x/index.js" })
   expect(sim2).toBeInstanceOf(SimBackend)
-  // every way of asking for native is refused, and says why
-  await expect(createBackend({ MAGPIE_LAYERFS_BACKEND: "native" })).rejects.toThrow("sim-only")
-  await expect(createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-auto-"), MAGPIE_LAYERFS_NATIVE: "1" }))
-    .rejects.toThrow("follow-up PR once @layerfs/sdk is published")
-  await expect(createBackend({ MAGPIE_LAYERFS_HOME: mkTmp("layerfs-auto-") }, { native: true }))
-    .rejects.toThrow("sim-only")
+  // an explicit native request — env or option — is refused loudly
+  await expect(createBackend({ MAGPIE_LAYERFS_BACKEND: "native" })).rejects.toThrow("not shipped")
+  await expect(createBackend(
+    { MAGPIE_LAYERFS_HOME: mkTmp("layerfs-sim-") }, { native: true })).rejects.toThrow("not shipped")
   await expect(createBackend({ MAGPIE_LAYERFS_BACKEND: "bogus" })).rejects.toThrow("auto or sim")
 })
 
-test("item 8 + r2 item 3: no trajectory file is maintained per call; the trajectory builds on demand", async () => {
-  const pageFile = join(import.meta.dir, "page", "trajectory.js")
+test("item 8 + r2 item 3: no trajectory file in the store, and no tool call writes into the page folder", async () => {
+  const pageDir = join(import.meta.dir, "page")
+  const pageFile = join(pageDir, "trajectory.js")
   const before = readFileSync(pageFile, "utf8")
+  const listedBefore = readdirSync(pageDir).sort()
   const { call, home } = await simTools()
   await call("provision", { project: "website" })
   await call("fork", { project: "website", branch: "feat" })
   const feat = await call("provision", { project: "website", branch: "feat" })
   writeFileSync(join(feat.path, "f.txt"), "f\n")
   await call("checkpoint", { project: "website", branch: "feat", message: "work" })
-  expect(readFileSync(pageFile, "utf8")).toBe(before) // the shipped file is a sample, untouched (item 8)
+  expect(readFileSync(pageFile, "utf8")).toBe(before) // the shipped sample is untouched (item 8)
+  // the registry review's install-folder rule: a run of mutating calls
+  // leaves the page folder exactly as shipped — no live file, no tmp file
+  expect(readdirSync(pageDir).sort()).toEqual(listedBefore)
   // 0.7.0 refreshed <root>/trajectory.json after every call; 0.7.1
   // dropped that — the refresh re-walked branch chains per call for a
-  // file nothing reads (r2 item 3)
+  // file nothing read (r2 item 3), and nothing writes one now either
   expect(existsSync(join(home, "trajectory.json"))).toBe(false)
   // the trajectory itself is still there, built when asked
   const traj = await new SimBackend(home).trajectory()
-  const proj = traj.projects.find((p) => p.name === "website")
-  expect(proj.branches.map((x) => x.name).sort()).toEqual(["feat", "main"])
-  const featSlice = proj.branches.find((x) => x.name === "feat")
-  expect(featSlice.commits.at(-1).message).toBe("work")
+  const proj2 = traj.projects.find((p) => p.name === "website")
+  expect(proj2.branches.map((x) => x.name).sort()).toEqual(["feat", "main"])
+  const featSlice2 = proj2.branches.find((x) => x.name === "feat")
+  expect(featSlice2.commits.at(-1).message).toBe("work")
   expect(traj.totals.logicalBytes).toBeGreaterThan(0)
+})
+
+test("trajectory() rebuilds read only new commits: a second rebuild reads none", async () => {
+  const { call, home } = await simTools()
+  await call("provision", { project: "website" })
+  const b = new SimBackend(home)
+  await b.trajectory() // first build parses every record once
+  // guard: summaries are cached per project/id, so a rebuild with
+  // nothing new must not touch the store's records again
+  let reads = 0
+  const orig = b.readCommit.bind(b)
+  b.readCommit = (...a) => { reads++; return orig(...a) }
+  await b.trajectory()
+  expect(reads).toBe(0)
+  await call("checkpoint", { project: "website", message: "second" })
+  reads = 0
+  const t = await b.trajectory()
+  const main = t.projects.find((p) => p.name === "website").branches.find((x) => x.name === "main")
+  expect(main.commits).toHaveLength(2)
+  expect(main.commits[0].message).toMatch(/^Import /)
+  expect(main.commits.at(-1).message).toBe("second")
+  expect(reads).toBe(1) // only the new checkpoint's record
+})
+
+test("calls record the real calling agent on commits and events; the trajectory carries it", async () => {
+  const { call, tool, home } = await simTools()
+  await call("provision", { project: "website" }) // agent "test" imports main
+  await call("fork", { project: "website", branch: "claude", from: "main" })
+  const ws = await call("provision", { project: "website", branch: "claude" })
+  writeFileSync(join(ws.path, "claude-work.txt"), "claude was here\n")
+  // a second agent checkpoints on the branch: the commit names the agent that made it
+  await tool.checkpoint.execute(
+    { project: "website", branch: "claude", message: "claude: first edit" },
+    { agent: "claude", abort: AbortSignal.timeout(5000) })
+  const b = new SimBackend(home)
+  const traj = await b.trajectory()
+  const proj = traj.projects.find((p) => p.name === "website")
+  const mainImport = proj.branches.find((x) => x.name === "main").commits[0]
+  expect(mainImport.agent).toBe("test") // the importing agent, not a guess from the branch name
+  const claudeCommit = proj.branches.find((x) => x.name === "claude").commits.at(-1)
+  expect(claudeCommit.agent).toBe("claude")
+  // events carry it too
+  const events = b.readEvents()
+  expect(events.find((e) => e.kind === "provision" && e.branch === "main").agent).toBe("test")
+  expect(events.find((e) => e.kind === "checkpoint" && e.branch === "claude").agent).toBe("claude")
 })
 
 test("items 9+10: slash branches are distinct, flat, and listed everywhere", async () => {
