@@ -64,7 +64,8 @@ test('a failed sign-in says which file it looked for, and a failed Work check is
   const missing=I.createPlugin({readSession:()=>I.readDesktop('/nowhere/kimi-desktop/daimon-share/daimon/config.json')});
   const a=await (await missing.auth.methods[0].authorize()).callback();
   expect(a.type).toBe('failed');
-  expect(a.error).toContain('/nowhere/kimi-desktop/daimon-share/daimon/config.json');
+  // the share folder itself is gone, so it is the folder that is named (#444)
+  expect(a.error).toContain('/nowhere/kimi-desktop/daimon-share');
   const session={uid:'u',workToken:'synthetic-work-token',webToken:'w'};
   const down=I.createPlugin({readSession:()=>session,fetchImpl:async()=>{throw Object.assign(TypeError('fetch failed'),{cause:{code:'ECONNRESET'}});}});
   const b=await (await down.auth.methods[0].authorize()).callback();

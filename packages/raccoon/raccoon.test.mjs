@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { RaccoonAuthPlugin, _internal } from "./index.mjs"
 
 function fakeJwt(claims) {
@@ -170,6 +170,68 @@ test("desktop sign-in is read-only and never writes or refreshes auth.json", asy
   expect(refreshCalled).toBe(false)
   expect(res.signIn).toBe("expired")
   expect(await Bun.file(authFile).text()).toBe(originalContent)
+})
+
+// Where Raccoon desktop 1.1.3 keeps auth.json, read from its app.asar:
+// clientProfile.ts puts the box-agent home at <profile>/agent, the profile at
+// app.getPath("appData")/office-raccoon on macOS and at ~/.office-raccoon on
+// Windows; older installs keep ~/.box-agent/config/auth.json.
+test("desktop auth.json candidates follow each OS's profile layout", () => {
+  const home = "/h"
+  expect(_internal.desktopAuthCandidates(home, "darwin", {})).toEqual([
+    join(home, "Library", "Application Support", "office-raccoon", "agent", "config", "auth.json"),
+    join(home, ".box-agent", "config", "auth.json"),
+  ])
+  expect(_internal.desktopAuthCandidates(home, "win32", {})).toEqual([
+    join(home, ".office-raccoon", "agent", "config", "auth.json"),
+    join(home, "AppData", "Roaming", "office-raccoon", "agent", "config", "auth.json"),
+    join(home, ".box-agent", "config", "auth.json"),
+  ])
+  expect(_internal.desktopAuthCandidates(home, "win32", { APPDATA: "/ad" })[1]).toBe(
+    join("/ad", "office-raccoon", "agent", "config", "auth.json"),
+  )
+  expect(_internal.desktopAuthCandidates(home, "linux", {})).toEqual([
+    join(home, ".config", "office-raccoon", "agent", "config", "auth.json"),
+    join(home, ".box-agent", "config", "auth.json"),
+  ])
+  expect(_internal.desktopAuthCandidates(home, "darwin", { BOX_AGENT_CONFIG_DIR: "/custom" })).toEqual([
+    join("/custom", "auth.json"),
+  ])
+})
+
+test("desktop auth.json is found at both the current and the legacy layout", async () => {
+  tempDir = mkdtempSync(join(tmpdir(), "raccoon-home-"))
+  const tok = fakeJwt({ iss: "74350b", name: "DeskUser", exp: Math.floor(Date.now() / 1000) + 3600 })
+  const body = JSON.stringify({ access_token: tok, office_identity: "personal" })
+  const candidates = _internal.desktopAuthCandidates(tempDir, "darwin", {})
+  const [current, legacy] = candidates
+
+  expect(_internal.desktopAuthPath(candidates)).toBe(current) // neither: the first, read as signed out
+
+  // the box-agent build keeps the file here
+  mkdirSync(dirname(legacy), { recursive: true })
+  writeFileSync(legacy, body)
+  expect(_internal.desktopAuthPath(candidates)).toBe(legacy)
+
+  // the profile build writes here instead; it wins when both exist
+  mkdirSync(dirname(current), { recursive: true })
+  writeFileSync(current, body)
+  expect(_internal.desktopAuthPath(candidates)).toBe(current)
+
+  // and the sign-in reads it, through the env override this file's other
+  // desktop tests use (Bun's homedir() can't be moved after start)
+  const prev = process.env.RACCOON_BOX_AGENT_CONFIG_DIR
+  process.env.RACCOON_BOX_AGENT_CONFIG_DIR = dirname(current)
+  try {
+    const hooks = await RaccoonAuthPlugin({ client: {} })
+    const method = hooks.auth.methods.find((m) => m.label.includes("桌面端"))
+    const res = await (await method.authorize()).callback()
+    expect(res.type).toBe("success")
+    expect(res.access).toBe(tok)
+  } finally {
+    if (prev === undefined) delete process.env.RACCOON_BOX_AGENT_CONFIG_DIR
+    else process.env.RACCOON_BOX_AGENT_CONFIG_DIR = prev
+  }
 })
 
 test("usage does not invent 300/9000 floors when bills do not cover balance", async () => {

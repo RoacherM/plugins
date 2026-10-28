@@ -231,7 +231,9 @@ which levels it takes — its `reasoning_effort_config`, with the options
 (`light`, `high`, `extra_high`) and the default. The request takes the same
 names as `reasoning_effort`, so a level an agent picks is sent as Trae
 spells it: the plugin offers each model's own levels as `variants`
-(`low`/`high`/`xhigh` for `light`/`high`/`extra_high`), and sends nothing
+(`low`/`high`/`xhigh` for `light`/`high`/`extra_high`; `medium` and `max`
+keep their names, offered only where the entry names them, as for DeepSeek
+V4.1 Flash's `max` in Trae's app), and sends nothing
 for a level the model doesn't name, or for a model whose entry names none —
 Trae then serves it at its own default. An entry naming levels this map
 can't spell offers none, rather than being sent one Trae would reject. A

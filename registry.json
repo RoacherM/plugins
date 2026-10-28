@@ -64,10 +64,14 @@
       "summary": { "en": "Claude Code and Claude Desktop on an Antigravity account: the words Antigravity refuses their system prompt for are broken up, in what Antigravity alone is sent.", "zh": "让 Claude Code 和 Claude Desktop 能用 Antigravity 账号：只在发给 Antigravity 的请求里拆开它据以拒绝系统提示词的那几个词。" } },
     { "package": "@magpie-community/middleware-codex-history", "name": "Codex History Filter", "kind": "middleware", "community": true,
       "summary": { "en": "Opt-in, per-provider Codex Responses history filtering after switching providers. Preserves readable content and tool-call pairing; no model probes.", "zh": "按供应商开关 Codex Responses 历史过滤，缓解切换上游后的密文和历史 ID 兼容问题；保留正文与工具配对，不运行模型检测。" } },
+    { "package": "@magpie-community/middleware-history-trim", "name": "History Trim", "kind": "middleware", "community": true,
+      "summary": { "en": "Send a request's history smaller: fold a run of blank lines, drop a system prompt written twice and a message repeated right after itself, and cut a past tool result longer than maxToolLength at a word boundary. The turn being sent now is left whole.", "zh": "把请求的历史发得更小：折叠连续空行、去掉逐字重复的 system 提示与紧挨着重复的消息、把历史中超过 maxToolLength 的工具结果在词边界处截断；正在发送的这一轮原样不动。" } },
     { "package": "@magpie-community/agent-aider", "name": "Aider", "kind": "agent", "community": true,
       "summary": { "en": "Aider (aider.chat) on magpie's Agents page: pick one of magpie's models for it, and switch it off to put its config back.", "zh": "把 Aider（aider.chat）加到 magpie 的 Agent 页：给它选 magpie 的模型，关掉即恢复它原来的配置。" } },
     { "package": "@magpie-community/agent-pig", "name": "PiG", "kind": "agent", "community": true,
       "summary": { "en": "PiG (Pi in Go): add Magpie's endpoint and model catalog, choose models in PiG, and keep startup settings unchanged.", "zh": "为 PiG（Pi in Go）注入 Magpie 端点与模型列表，在 PiG 内选择模型，保持启动设置不变。" } },
+    { "package": "@magpie-community/agent-bub", "name": "Bub", "kind": "agent", "community": true,
+      "summary": { "en": "Bub (bub.build) on magpie's Agents page: pick one of magpie's models and Bub uses it, through ~/.bub/config.yml. Needs Bub 0.5.1 or later.", "zh": "把 Bub（bub.build）加到 magpie 的 Agent 页：给它选一个 magpie 的模型，通过 ~/.bub/config.yml 生效。需要 Bub 0.5.1 或更新版本。" } },
     { "package": "@magpie-community/agent-type4me", "name": "Type4Me", "kind": "agent", "community": true,
       "summary": { "en": "Type4Me (macOS voice input) on magpie's Agents page: pick one of magpie's models for its LLM post-processing, used from the next dictation.", "zh": "把 Type4Me（macOS 语音输入）加到 magpie 的 Agent 页：给它的 LLM 后处理选 magpie 的模型，下一次语音输入即生效。" } },
     { "package": "@magpie-community/agent-cowork", "name": "Tuanjie Cowork", "kind": "agent", "community": true,
@@ -83,6 +87,10 @@
       "summary": { "en": "A page in magpie's window with calls, errors, tokens and cost for today, 7 or 30 days, and the models behind them. Reads only your usage summary.", "zh": "在 magpie 窗口里一眼看到今天、7 天或 30 天的调用、错误、token、费用和对应模型。只读取用量汇总。" } },
     {"package": "@magpie-community/agent-kimi-desktop", "name": "Kimi", "kind": "agent", "community": true, "summary": {"en": "Kimi desktop Work on Magpie's Agents page: select a model from Magpie, then disconnect to restore the original service. Not Kimi Code CLI.", "zh": "把普通 Kimi 桌面版 Work 接入 Magpie Agent 页，使用已配置的模型；断开恢复原连接。不是 Kimi Code CLI。"}},
     { "package": "@magpie-community/opencode-cloudflare-workers-ai-auth", "name": "Cloudflare Workers AI", "providers": ["cloudflare-workers-ai"], "community": true,
-      "summary": { "en": "Cloudflare Workers AI with your API token (Workers AI:Edit): 28+ models discovered live from models.dev, the 8 paid-only models flagged, and a Neurons/day allowance row in magpie quota.", "zh": "用你的 Cloudflare API Token（Workers AI:Edit 权限）登录 Workers AI：28+ 模型经 models.dev 实时发现，付费专属模型自动标注，magpie quota 显示每日 Neurons 免费额度。" } }
+      "summary": { "en": "Cloudflare Workers AI with your API token (Workers AI:Edit): 28+ models discovered live from models.dev, the 8 paid-only models flagged, and a Neurons/day allowance row in magpie quota.", "zh": "用你的 Cloudflare API Token（Workers AI:Edit 权限）登录 Workers AI：28+ 模型经 models.dev 实时发现，付费专属模型自动标注，magpie quota 显示每日 Neurons 免费额度。" } },
+    { "package": "officeace-auth", "name": "OfficeAce", "providers": ["officeace"], "community": true,
+      "summary": { "en": "Unofficial OfficeAce (Huawei Cloud AgentArts): browser sign-in to a Huawei Cloud account, live models with their credit multipliers, credit usage by bucket, and the daily check-in.", "zh": "非官方 OfficeAce（华为云 AgentArts）：浏览器登录华为云账号，实时模型及其积分倍率、分桶积分用量，以及每日签到。" } },
+    { "package": "@magpie-community/opencode-river-auth", "name": "River", "providers": ["river"], "community": true,
+      "summary": { "en": "River (river.ai) pay-as-you-go inference with your API key: per-account models from /v1/models, documented reasoning efforts and live prices from River's public pricing endpoint.", "zh": "用你的 API key 接入 River (river.ai) 按量计费推理：按账号从 /v1/models 列出模型，带官方推理档位与实时价格。" } }
   ]
 }

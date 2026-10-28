@@ -25,17 +25,21 @@ Every reasoning-effort value returned by `/models` is retained, including `STAND
 
 ## Sign-in and local files
 
-The plugin reads only the desktop app's `daimon/config.json` in its `daimon-share` folder. That folder is where Kimi's own `daimon-storage.json` points (`shareDir`), or, with no such file, `daimon-share` itself, in Kimi's data folder:
+The plugin reads only the desktop app's `daimon/config.json`, and since 0.1.13 its `daimon/kimi-code-key.json`, in its `daimon-share` folder. That folder is where Kimi's own `daimon-storage.json` points (`shareDir`), or, with no such file, `daimon-share` itself, in Kimi's data folder:
 
 - Windows: `%APPDATA%/kimi-desktop/`
 - macOS: `~/Library/Application Support/kimi-desktop/`
 - Linux: `~/.config/kimi-desktop/`
 
-Kimi 3.2.21 on Windows, installed on another drive than `%APPDATA%`'s, keeps it there (`D:\KimiData\daimon-share` for an install on D:), and Kimi writes the same pointer on any system when its storage is moved. When the sign-in can't be found, the error names the file it looked for.
+Kimi 3.2.21 on Windows, installed on another drive than `%APPDATA%`'s, keeps it there (`D:\KimiData\daimon-share` for an install on D:), and Kimi writes the same pointer on any system when its storage is moved. When the sign-in can't be found, the error names the file it looked for. Since 0.1.13, when the `daimon-share` folder itself is gone (moved, deleted, or on a drive that isn't mounted), the error names that folder instead (`kimi_work_share_missing`) and does not mark the account signed out: the sign-in in it isn't known to have lapsed. Putting the folder back makes the account work again at once, with no new sign-in. Kimi makes the folder again only when it starts, so signing in again in a running Kimi doesn't bring it back; quit and reopen Kimi, then sign in to Work.
 
-The internal Work credential is named `credentials.kimiCode`, but its origin must be exactly `https://agent-gw.kimi.com/coding/v1`. `credentials.kimiWeb` supplies the membership sign-in. The plugin rejects missing credentials and other origins. It saves only a hashed account reference in Magpie/OpenCode's auth store; the actual tokens remain in Kimi's own file and are reread on each operation. It never reads Magpie's credential files, writes Kimi configuration, consumes refresh tokens, or stores copies of desktop credentials.
+The internal Work credential is named `credentials.kimiCode`, but its origin must be exactly `https://agent-gw.kimi.com/coding/v1`. `credentials.kimiWeb` supplies the membership sign-in. The plugin rejects missing credentials and other origins. It saves only a hashed account reference in Magpie/OpenCode's auth store; the actual tokens remain in Kimi's own files (`config.json`, and `kimi-code-key.json` for an account Kimi has switched away from) and are reread on each operation. It never reads Magpie's credential files, writes Kimi configuration, consumes refresh tokens, or stores copies of desktop credentials.
 
-Kimi desktop remains responsible for refreshing its sign-in. If it expires, sign in there and reconnect this provider. Changing the desktop account requires reconnecting, so requests do not silently switch accounts. Each synced device must have its own Kimi desktop sign-in.
+Kimi desktop remains responsible for refreshing its sign-in. If it expires, sign in there and reconnect this provider. Each synced device must have its own Kimi desktop sign-in.
+
+### Several Kimi accounts
+
+Since 0.1.13 each Kimi user signed in here is an account of its own (named `Kimi Work · ` and the start of its hashed id), and requests never switch silently from one to another. To add a second one, switch Kimi desktop to that user, open Work once, and sign in to this provider again. Both keep working after Kimi switches back and forth: Kimi keeps one minted Work key per user in `daimon/kimi-code-key.json` (`{"v":2,"keys":[{userId,apiKey,keyId?}]}`, Kimi 3.2.21) and reuses a user's key when it switches back to them; it drops one only when the Work gateway refuses it. The account Kimi is signed in to uses `config.json`'s key; any other uses its key from that file. Only the user Kimi is signed in to has a web sign-in, so the shared membership allowance can be read only for that account; the others show that they need switching to in Kimi, and chat is unaffected. An account whose key is no longer in Kimi's file, or whose key the gateway refuses, is marked signed out (`kimi_work_account_not_here`) until Kimi is switched to it and opens Work. Kimi signed out entirely (no Work sign-in in `config.json`) serves none of them. Accounts signed in before 0.1.13 are named `Kimi Work (local)`; signing in to the same user again adds it under the new name, and the old entry can be removed.
 
 ## Origin and provider-id conflict
 

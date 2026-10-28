@@ -2,9 +2,9 @@
 //
 // Raccoon signs in through xiaohuanxiong.com's desktop authorization page
 // (/code/authorize -> office-raccoon://auth/callback?code=...&state=...), or
-// reads the live session Raccoon's desktop app keeps in
-// ~/.box-agent/config/auth.json (read-only). Chats are OpenAI-compatible chat
-// completions at /api/web/llm/v2/chat/completions.
+// reads the live session Raccoon's desktop app keeps in its auth.json
+// (read-only; desktopAuthCandidates lists where). Chats are OpenAI-compatible
+// chat completions at /api/web/llm/v2/chat/completions.
 
 import { randomUUID, randomBytes } from "node:crypto"
 import { createServer } from "node:http"
@@ -106,14 +106,47 @@ function vendorErrorText(payload, fallback) {
   return fallback
 }
 
-// ---- Desktop auth.json (~/.box-agent/config/auth.json, read-only) -----------
+// ---- Desktop auth.json (read-only) ------------------------------------------
+//
+// The desktop app has moved this file between releases. Builds that keep a
+// client profile (1.1.x) put the box-agent home inside it and write
+// <profile>/agent/config/auth.json, with the profile at
+//   Windows: %USERPROFILE%\.office-raccoon (moved there from %APPDATA%)
+//   macOS:   ~/Library/Application Support/office-raccoon
+// (clientProfile.ts: openDefaultClientProfile, app.getPath("appData")).
+// Older installs, and a profile the app still treats as legacy user data,
+// keep ~/.box-agent/config/auth.json. Every layout is read, the profile ones
+// first, so either build is picked up without an env override.
 
-function desktopAuthPath() {
+// The arguments are for tests: Bun reads homedir() once, at start.
+function appDataDir(home, platform, env) {
+  if (platform === "win32") return String(env.APPDATA ?? "").trim() || join(home, "AppData", "Roaming")
+  if (platform === "darwin") return join(home, "Library", "Application Support")
+  return String(env.XDG_CONFIG_HOME ?? "").trim() || join(home, ".config")
+}
+
+function desktopAuthCandidates(home = homedir(), platform = process.platform, env = process.env) {
   for (const envKey of ["RACCOON_BOX_AGENT_CONFIG_DIR", "BOX_AGENT_CONFIG_DIR"]) {
-    const v = String(process.env[envKey] ?? "").trim()
-    if (v) return join(v, "auth.json")
+    const v = String(env[envKey] ?? "").trim()
+    if (v) return [join(v, "auth.json")]
   }
-  return join(homedir(), ".box-agent", "config", "auth.json")
+  const profiles = [join(appDataDir(home, platform, env), "office-raccoon")]
+  if (platform === "win32") profiles.unshift(join(home, ".office-raccoon"))
+  return [
+    ...profiles.map((p) => join(p, "agent", "config", "auth.json")),
+    join(home, ".box-agent", "config", "auth.json"),
+  ]
+}
+
+// The first candidate that is a file, else the first (which then reads as
+// not signed in).
+function desktopAuthPath(candidates = desktopAuthCandidates()) {
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) return candidate
+    } catch {}
+  }
+  return candidates[0]
 }
 
 function readDesktopAuth() {
@@ -208,7 +241,7 @@ function isStale(a, marginMs = EARLY_MS) {
   return exp > 0 && Date.now() >= exp - marginMs
 }
 
-// Desktop sign-in is strictly read-only: never write ~/.box-agent/config/auth.json
+// Desktop sign-in is strictly read-only: never write the app's auth.json
 // and never spend the desktop app's refresh token. The app holds one account
 // at a time, so a seat keeps the token it was signed in with, saved on its own
 // record through the client (as kiro does), and reads the app only to take a
@@ -862,7 +895,7 @@ function manualSignIn() {
 function desktopSignIn() {
   return {
     url: "",
-    instructions: "直接复用本机商汤小浣熊客户端的实时登录态 (~/.box-agent/config/auth.json)。",
+    instructions: "直接复用本机商汤小浣熊客户端的实时登录态（只读，不写入桌面端文件）。",
     method: "auto",
     async callback() {
       // A new seat takes the account the app holds now, and its token, and
@@ -871,7 +904,12 @@ function desktopSignIn() {
       // disk. Only the app's own account is offered here, so a seat is never
       // quietly handed some other account's credentials.
       const d = readDesktopAuth()
-      if (!d) return { type: "failed", error: "未检测到本机商汤小浣熊登录态 (~/.box-agent/config/auth.json)" }
+      if (!d) {
+        return {
+          type: "failed",
+          error: `未检测到本机商汤小浣熊登录态（已查找 ${desktopAuthCandidates().join("、")}）`,
+        }
+      }
       if (isStale(d, EARLY_MS)) {
         return { type: "failed", error: "商汤小浣熊桌面端登录态已过期，请先打开商汤小浣熊客户端重新登录" }
       }
@@ -1068,7 +1106,7 @@ export const RaccoonAuthPlugin = async ({ client }) => {
         },
         {
           type: "oauth",
-          label: "商汤小浣熊桌面端登录态 (~/.box-agent/config/auth.json)",
+          label: "商汤小浣熊桌面端登录态（读取本机客户端）",
           authorize: async () => desktopSignIn(),
         },
         {
@@ -1083,6 +1121,8 @@ export const RaccoonAuthPlugin = async ({ client }) => {
 
 export const _internal = {
   browserSignIn,
+  desktopAuthPath,
+  desktopAuthCandidates,
   sameAccount,
   stripBearer,
   decodeJwtClaims,

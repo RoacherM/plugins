@@ -119,6 +119,8 @@ test("models: a ck_ key asks /v3/config with the key's headers, another key asks
   expect(sent[0].url).toBe("https://copilot.tencent.com/v3/config")
   expect(sent[0].headers.get("x-api-key")).toBe(KEY)
   expect(sent[0].headers.get("authorization")).toBe("Bearer " + KEY)
+  // the CLI asks it with its own User-Agent (CLI/<v> in it picks the cli list)
+  expect(sent[0].headers.get("user-agent")).toBe("WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0")
   expect(Object.keys(got)).toEqual(["glm-9"])
 
   const other = await hooks.provider.models(provider, { auth: { type: "api", key: "sk-something-else" } })

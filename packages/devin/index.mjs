@@ -1298,9 +1298,21 @@ const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v)
 // schema with properties is an object; an enum's type comes from its
 // values, and an enum of mixed values goes. The caller's own is never
 // changed.
+//
+// Below the root it also refuses an anyOf beside a type, which is what
+// magpie's gateway sends for a Gemini model: it writes the type the
+// branches agree on beside an anyOf that had none, so Kimi Code's Read
+// (line_offset: anyOf of two integers) and every Optional field came in
+// as {type: "integer", anyOf: [...]} and were refused (songyq26,
+// plugins#458). A oneOf beside a type, an anyOf at the root and an anyOf
+// with no type are taken, and a oneOf with no type beside nullable is
+// not, so only an anyOf beside a type is changed: its null branches
+// become nullable, one branch left of that type (or of none) is merged
+// into the schema, and two or more are sent as a oneOf (into allOf when
+// there is a oneOf already).
 function geminiSchema(s, depth = 0) {
   if (!isObj(s) || depth > 32) return s
-  const out = { ...s }
+  let out = { ...s }
   const sub = (v) => geminiSchema(v, depth + 1)
   for (const k of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"])
     if (isObj(out[k])) out[k] = Object.fromEntries(Object.entries(out[k]).map(([n, v]) => [n, sub(v)]))
@@ -1318,6 +1330,19 @@ function geminiSchema(s, depth = 0) {
       out.anyOf = Array.isArray(out.anyOf) ? [...out.anyOf, ...branches] : branches
     }
     if (out.type === undefined) delete out.type
+  }
+  if (depth > 0 && out.type !== undefined && Array.isArray(out.anyOf)) {
+    const isNull = (b) => isObj(b) && b.type === "null"
+    const some = out.anyOf.filter((b) => !isNull(b))
+    if (some.length < out.anyOf.length) out.nullable = true
+    delete out.anyOf
+    const one = some.length === 1 && isObj(some[0]) ? some[0] : undefined
+    if (one && (one.type === undefined || one.type === out.type)) {
+      out = { ...one, ...out }
+    } else if (some.length) {
+      if (!Array.isArray(out.oneOf)) out.oneOf = some
+      else out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), { oneOf: some }]
+    }
   }
   if (out.type === undefined && Array.isArray(out.enum)) {
     const vals = out.enum.filter((v) => v !== null)

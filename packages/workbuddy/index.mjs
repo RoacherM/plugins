@@ -6,7 +6,8 @@
 // the token as WorkBuddy's desktop app does) or is taken from WorkBuddy
 // desktop's own sign-in. Its chats are chat completions at <endpoint>/v2,
 // streamed only, with WorkBuddy's headers: a request whose User-Agent isn't
-// WorkBuddy/<version> is refused (error 10085).
+// WorkBuddy/<version> is refused (error 10085). Each build's headers are
+// those of its current desktop app (see SITES' app, cli and appName).
 
 import { createHash, randomBytes } from "node:crypto"
 import { readFileSync } from "node:fs"
@@ -14,7 +15,6 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 const APP_VERSION = "2.0.0" // the version WorkBuddy's sign-in page is opened with
-const UA_VERSION = "5.5.6" // WorkBuddy/<this> is the User-Agent the API takes
 const POLL_MS = 1000
 const SIGN_IN_MS = 5 * 60 * 1000
 const EARLY_MS = 60 * 1000 // a token this close to its end is refreshed before a request
@@ -67,6 +67,16 @@ const SITES = {
     authID: "workbuddy-desktop",
     platform: "workbuddy",
     ai: false,
+    // the desktop app the requests are WorkBuddy's own client's of: its
+    // version, its bundled CLI's (@genie/agent-cli), and the CLI's
+    // product.json applicationName. Read from WorkBuddy 5.9.3.42398134,
+    // the update feed's current build on 2026-10-28.
+    app: "5.9.3",
+    cli: "2.165.0",
+    appName: "WorkBuddy",
+    // 5.9's CLI says on each chat where the agent runs; the desktop's own
+    // is "local-agent" (X-Agent-Runtime, absent in 5.8)
+    runtime: "local-agent",
     // where this build's API keys are made (see keyAccount)
     keys: "https://www.workbuddy.cn/profile/keys",
     models: CN_MODELS,
@@ -81,6 +91,11 @@ const SITES = {
     authID: "workbuddy-desktop-ai",
     platform: "workbuddy-ai",
     ai: true,
+    // WorkBuddy AI 5.8.4.41366630, its update feed's current build on
+    // 2026-10-28 (see the China build's)
+    app: "5.8.4",
+    cli: "2.161.0",
+    appName: "workbuddy-ai",
     keys: "https://www.workbuddy.ai/profile/keys",
     models: AI_MODELS,
     // models whose images WorkBuddy AI drops though its config says they
@@ -155,7 +170,7 @@ async function call(site, method, path, headers = {}, body) {
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "User-Agent": "WorkBuddy/" + UA_VERSION,
+      "User-Agent": "WorkBuddy/" + site.app,
       ...headers,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -312,15 +327,51 @@ function sign(site, a, headers) {
   }
   headers.set("X-Product", "SaaS")
   headers.set("X-IDE-Type", "WorkBuddy")
-  headers.set("User-Agent", "WorkBuddy/" + UA_VERSION)
+  headers.set("User-Agent", cliAgent(site))
   headers.set("X-Requested-With", "XMLHttpRequest")
   headers.set("X-Agent-Intent", "craft")
   headers.set("X-Agent-Purpose", "conversation")
   headers.set("X-IDE-Name", "WorkBuddy")
-  headers.set("X-IDE-Version", UA_VERSION)
+  headers.set("X-IDE-Version", site.app)
   for (const [k, v] of Object.entries(enterpriseHeaders(a))) headers.set(k, v)
-  if (!site.ai) return
+}
+
+// cliAgent is the User-Agent WorkBuddy's desktop CLI sends its API calls
+// (a chat, the product config) with: UserAgentHttpInterceptor's
+// buildUserAgent puts the platform (CLIENT_INFO_PLATFORM "WorkBuddy", at
+// the app's version) first, then the CLI's applicationName at the same
+// version, then CLIENT_INFO_USER_AGENT_EXTENSION, "CLI/<its version>".
+function cliAgent(site) {
+  return `WorkBuddy/${site.app} ${site.appName}/${site.app} CLI/${site.cli}`
+}
+
+// OPENAI_SDK and NODE are what the CLI's chats go out through: the OpenAI
+// SDK it bundles (openai 6.25.0) and the Node its Electron runs it on
+// (Electron 37.10.3, ELECTRON_RUN_AS_NODE).
+const OPENAI_SDK = "6.25.0"
+const NODE = "v22.21.1"
+const SDK_OS = { darwin: "MacOS", win32: "Windows", linux: "Linux", freebsd: "FreeBSD", openbsd: "OpenBSD", android: "Android" }
+const SDK_ARCH = { x64: "x64", arm64: "arm64", arm: "arm", ia32: "x32", x32: "x32" }
+
+// chatHeaders sets on a chat what WorkBuddy's CLI adds to its model
+// requests alone (axiosToFetchAdapter, both builds): the agent type
+// (resolveModelCallAgentType, "main" for the conversation's own agent),
+// the runtime where a build sends one, and the OpenAI SDK's own headers,
+// which the CLI's fetch passes on. Its client has a 1200s timeout and
+// no retries of its own.
+function chatHeaders(site, headers) {
   headers.set("X-Agent-Type", "main")
+  if (site.runtime) headers.set("X-Agent-Runtime", site.runtime)
+  else headers.delete("X-Agent-Runtime")
+  headers.set("Accept", "application/json")
+  headers.set("X-Stainless-Retry-Count", "0")
+  headers.set("X-Stainless-Timeout", "1200")
+  headers.set("X-Stainless-Lang", "js")
+  headers.set("X-Stainless-Package-Version", OPENAI_SDK)
+  headers.set("X-Stainless-OS", SDK_OS[process.platform] ?? (process.platform ? `Other:${process.platform}` : "Unknown"))
+  headers.set("X-Stainless-Arch", SDK_ARCH[process.arch] ?? (process.arch ? `other:${process.arch}` : "unknown"))
+  headers.set("X-Stainless-Runtime", "node")
+  headers.set("X-Stainless-Runtime-Version", NODE)
 }
 
 // keyAccount is the account an API key (OpenCode's {type: "api", key}) is
@@ -592,6 +643,12 @@ function withoutSignedThinking(body) {
 
 // chatOf is a chat's body as the object it is, null for one that isn't: a
 // body that isn't text (bytes), or isn't JSON at all.
+// bodyString is a body given as bytes, as text; anything else is null.
+function bodyString(body) {
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return new TextDecoder().decode(body)
+  return null
+}
+
 function chatOf(body) {
   if (typeof body !== "string") return null
   try {
@@ -699,6 +756,36 @@ function unflag(messages) {
 // OpenAI-compatible client normally uses max_completion_tokens and may call a
 // reasoning prompt developer; WorkBuddy's endpoint takes max_tokens and
 // system instead.
+// An earlier turn's thinking goes back as `reasoning`, the field WorkBuddy's
+// own client (CodeBuddy's agents converter) sets on an assistant message.
+// WorkBuddy drops `reasoning_content`, which Grok Build, DeepSeek-style
+// clients and magpie's own replies use: measured 2026-10-27 on
+// www.workbuddy.ai, a codeword in reasoning_content reached none of
+// kimi-k2.6, kimi-k3, glm-5.3, deepseek-v4.1-flash and minimax-m3, while
+// the same words as `reasoning` reached kimi-k2.6 and minimax-m3.
+// OpenRouter-style reasoning_details are read for their text the same way.
+function reasoningOf(m) {
+  if (typeof m.reasoning_content === "string" && m.reasoning_content) return m.reasoning_content
+  if (Array.isArray(m.reasoning_details)) {
+    const text = m.reasoning_details.map((d) => (typeof d?.text === "string" ? d.text : typeof d?.summary === "string" ? d.summary : "")).join("")
+    if (text) return text
+  }
+  return ""
+}
+
+function asReasoning(messages) {
+  let changed = false
+  for (const m of messages) {
+    if (m?.role !== "assistant" || (m.reasoning_content === undefined && m.reasoning_details === undefined)) continue
+    const text = reasoningOf(m)
+    if (text && !(typeof m.reasoning === "string" && m.reasoning)) m.reasoning = text
+    delete m.reasoning_content
+    delete m.reasoning_details
+    changed = true
+  }
+  return changed
+}
+
 function withSystem(body) {
   // a body magpie or OpenCode hands over as bytes is read as the text it is
   if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) body = new TextDecoder().decode(body)
@@ -717,6 +804,7 @@ function withSystem(body) {
       m.role = "system"
       changed = true
     }
+    if (asReasoning(b.messages)) changed = true
     if (b.messages[0]?.role !== "system") {
       b.messages.unshift({ role: "system", content: "You are a helpful assistant." })
       changed = true
@@ -1422,7 +1510,7 @@ const statusText = (n) => STATUS_TEXT[n] || `HTTP ${n}`
 function meterAsked(site, a, path, body = {}, signal = AbortSignal.timeout(20000)) {
   return fetch(site.endpoint + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "WorkBuddy/" + UA_VERSION,
+    headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "WorkBuddy/" + site.app,
       Authorization: "Bearer " + a.access, "X-User-Id": a.uid ?? "", "X-Domain": domainOf(site, a), "X-Product": "SaaS",
       "X-IDE-Type": "WorkBuddy", ...enterpriseHeaders(a) },
     body: JSON.stringify(body),
@@ -1650,14 +1738,31 @@ const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/
 // as used or left beside the share (magpie#659). The free plan is said as a
 // plan: "Free" alone beside the account read as the model being free, and
 // routing as preferring it for that (#337).
+//
+// A package with no CycleTotalCapacity has no denominator: it is sent as
+// magpie's balance-shaped window (#3950), {balance, unit} with no used,
+// limit or aside, and routing ranks it by what is left. A literal "0" total
+// is still a total, not a wallet: it stays on the old path, so a lapsed or
+// placeholder package adds nothing. A literal "0" remainder is a reading
+// of nothing left, not an absent field; only a package with no
+// CycleRemainCapacity at all leaves the window out. TotalCredits is not a
+// fallback: an account with no packages at all keeps its unknown allowance,
+// as before, so its free models are not skipped.
 function usageOf(sum, plan) {
   const out = { plan: plan || (sum?.IsPaidUser ? "Pro" : "Free plan"), windows: [] }
-  let total = 0, used = 0
+  let total = 0, used = 0, left = 0, bags = 0
   for (const p of sum?.Packages ?? []) {
-    total += capacity(p?.CycleTotalCapacity)
-    used += capacity(p?.CycleUsedCapacity)
+    const hasTotal = p?.CycleTotalCapacity != null && p.CycleTotalCapacity !== ""
+    if (hasTotal) {
+      total += capacity(p.CycleTotalCapacity)
+      used += capacity(p?.CycleUsedCapacity)
+    } else if (p?.CycleRemainCapacity != null && p.CycleRemainCapacity !== "") {
+      left += capacity(p.CycleRemainCapacity)
+      bags++
+    }
   }
   if (total > 0) out.windows.push({ name: "Credits", used: (100 * used) / total, display: `${compact(used)} / ${compact(total)}`, amount: used, limit: total, unit: "credits" })
+  if (bags > 0 && (total === 0 || left > 0)) out.windows.push({ name: "Prepaid credits", balance: left, display: `${compact(left)} credits`, unit: "credits" })
   return out
 }
 
@@ -1955,7 +2060,7 @@ function effortsOf(d, site, id) {
 async function liveModels(site, a) {
   const headers = new Headers()
   sign(site, a, headers)
-  headers.set("User-Agent", `CLI/${APP_VERSION} WorkBuddy/${UA_VERSION}`)
+  headers.set("User-Agent", cliAgent(site))
   headers.set("X-Requested-With", "XMLHttpRequest")
   headers.set("Accept", "application/json")
   const res = await fetch(site.endpoint + "/v3/config", { headers, signal: AbortSignal.timeout(15000) })
@@ -2027,6 +2132,29 @@ function replyAfterTools(body) {
   return JSON.stringify(b)
 }
 
+// FREE_ONLY is the switch that keeps an account off credits (#430): its
+// list holds only the models WorkBuddy serves at no cost (priceOf's free),
+// and a request for any other is answered here, never sent. A price that
+// can't be read is not free, and a list that can't be read sends nothing.
+const FREE_ONLY = "free_only"
+// PRICE_TTL is how long a list read for that check is used before it is
+// read again: a promotion that ends stops counting as free within it.
+const PRICE_TTL = 60_000
+
+// notFree is the answer to a request the switch keeps from WorkBuddy. Its
+// words say the model, not the account, is what is turned away, so magpie
+// rests that model alone and asks another provider of it; they name no
+// quota or credit, which would rest the whole account as out of credit.
+function notFree(site, model, why) {
+  const msg = why
+    ? `${site.name}'s model list couldn't be read (${why}), so whether model ${model || "(none)"} is free is unknown; with "Free models only" on it isn't sent`
+    : `model ${model || "(none)"} is not available while "Free models only" is on: ${site.name} charges for it. Turn the switch off in ${site.name}'s provider settings to use it`
+  return new Response(JSON.stringify({ error: { message: msg, type: "invalid_request_error", code: why ? "free_only_unknown" : "model_not_found" } }), {
+    status: why ? 503 : 404,
+    headers: { "content-type": "application/json", "X-Magpie-Sign-In": "kept" },
+  })
+}
+
 function makePlugin(site) {
   // the models of this site that refused tool results then the user's
   // message, for this run: their next chats go with replyAfterTools at once
@@ -2034,7 +2162,30 @@ function makePlugin(site) {
   // the system prompts this run WorkBuddy refused as an unapproved channel:
   // their next chats go with systemAsUser at once, not refused first
   const refusedSystems = new Set()
-  return async ({ client }) => ({
+  return async ({ client, magpie }) => {
+  // each account's list as last read, for FREE_ONLY: {at, list}
+  const lists = new Map()
+  const listKey = (a) => `${a.uid ?? ""}|${a.enterpriseId ?? ""}|${a.source === "key" ? a.key : ""}`
+  // listed is the account's live list, read again past PRICE_TTL
+  const listed = async (a, fresh = false) => {
+    const k = listKey(a)
+    const was = lists.get(k)
+    if (!fresh && was && Date.now() - was.at < PRICE_TTL) return was.list
+    const list = await liveModels(site, a)
+    lists.set(k, { at: Date.now(), list })
+    if (lists.size > 64) lists.delete(lists.keys().next().value)
+    return list
+  }
+  const freeOnly = () => magpie?.option?.(site.id, FREE_ONLY) === true
+  // onlyFree is a list with the switch on: its free models, or a failure
+  // when there are none to tell (magpie then keeps the list it had)
+  const onlyFree = (ms) => {
+    if (!freeOnly()) return ms
+    const free = ms.filter((m) => m.free)
+    if (!free.length) throw new Error(`${site.name} lists no free model, and "Free models only" is on`)
+    return free
+  }
+  return {
     config: async (config) => {
       config.provider ??= {}
       config.provider[site.id] ??= {}
@@ -2059,23 +2210,34 @@ function makePlugin(site) {
         if (auth?.type === "api") {
           // asked as WorkBuddy's own CLI asks with a key (remoteConfig)
           const a = keyAccount(auth)
-          if (!a || !remoteConfig(a.key)) return provider.models
-          try {
-            const ms = await liveModels(site, a)
-            return ms.length ? Object.fromEntries(ms.map((m) => [m.id, modelOf(site, provider, m)])) : provider.models
-          } catch {
+          if (!a || !remoteConfig(a.key)) {
+            if (freeOnly()) throw new Error(`${site.name} lists no prices for this key, and "Free models only" is on`)
             return provider.models
           }
+          let ms
+          try {
+            ms = await listed(a, true)
+          } catch (e) {
+            if (freeOnly()) throw e
+            return provider.models
+          }
+          if (!ms.length && !freeOnly()) return provider.models
+          return Object.fromEntries(onlyFree(ms).map((m) => [m.id, modelOf(site, provider, m)]))
         }
         if (auth?.type !== "oauth" || !(auth.access || auth.source)) return provider.models
+        let ms
         try {
           const a = await current(site, client, auth)
-          const ms = await liveModels(site, a)
-          if (!ms.length) return provider.models
-          return Object.fromEntries(ms.map((m) => [m.id, modelOf(site, provider, m)]))
-        } catch {
+          ms = await listed(a, true)
+        } catch (e) {
+          // with the switch on, a list without prices would offer models
+          // that cost credits: the failure goes up, and magpie keeps the
+          // list it had
+          if (freeOnly()) throw e
           return provider.models
         }
+        if (!ms.length && !freeOnly()) return provider.models
+        return Object.fromEntries(onlyFree(ms).map((m) => [m.id, modelOf(site, provider, m)]))
       },
     },
     auth: {
@@ -2087,6 +2249,13 @@ function makePlugin(site) {
       // and is renewed as before.
       refreshLead: LEAD_MS,
       refresh: (auth) => refreshed(site, auth),
+      options: [
+        {
+          key: FREE_ONLY,
+          label: "Free models only",
+          description: `Lists only the models ${site.name} serves at no cost, and turns away a request for any other here instead of sending it, so no credits are spent. A model free only at night counts as paid.`,
+        },
+      ],
       async loader(getAuth) {
         const auth = await getAuth()
         if (auth?.type !== "oauth" && auth?.type !== "api") return {}
@@ -2110,6 +2279,18 @@ function makePlugin(site) {
             sign(site, a, headers)
             let body = init?.body
             if (body === undefined && req) body = await req.clone().text()
+            // the switch is checked before anything is sent: a model not
+            // free, or one whose price can't be read, never reaches WorkBuddy
+            if (freeOnly()) {
+              const model = chatOf(typeof body === "string" ? body : bodyString(body))?.model
+              let list
+              try {
+                list = await listed(a)
+              } catch (e) {
+                return notFree(site, model, e?.message ?? String(e))
+              }
+              if (!list.some((m) => m.id === model && m.free)) return notFree(site, model)
+            }
             // An Anthropic request goes as the agent sent it: WorkBuddy
             // serves these models on Messages itself, and the rewrites
             // below (a default system message, the chat endpoint's
@@ -2129,6 +2310,7 @@ function makePlugin(site) {
             } else {
               body = withoutUnsigned(body)
             }
+            chatHeaders(site, headers)
             attend(headers, body, session)
             const post = (b) =>
               fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body: b }).catch((e) => unanswered(site, a, b, e, init?.signal))
@@ -2304,7 +2486,8 @@ function makePlugin(site) {
         },
       ],
     },
-  })
+  }
+  }
 }
 
 // REFUSED_HINT is what the user can do about WorkBuddy's "Illegal API
@@ -2409,4 +2592,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, answeredBefore, nativeOf, modelOf, configModels, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }

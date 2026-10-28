@@ -38,8 +38,9 @@ import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, con
 import { execFile } from "node:child_process"
 import { readdir, stat } from "node:fs/promises"
 import { STATUS_CODES } from "node:http"
-import { homedir } from "node:os"
+import { homedir, hostname } from "node:os"
 import { join, resolve } from "node:path"
+import { domainToASCII } from "node:url"
 
 const CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 const MODELS_PATH = "/algo/api/v2/model/list?Encode=1"
@@ -73,10 +74,33 @@ const hexID = () => randomUUID().replaceAll("-", "")
 
 // ---- the COSY envelope --------------------------------------------------------
 
-// machineOS names the machine as Qoder's desktop clients do.
-function machineOS() {
-  const arch = { x64: "x86_64", ia32: "x86", arm64: "aarch64" }[process.arch] ?? process.arch
-  return arch + "_" + process.platform
+// machineOS names the machine as Qoder's desktop client does: Node's
+// process.platform, so x86_64_win32 on Windows, aarch64_darwin on a Mac
+// (its worker runtime's COSY_MACHINE_OS, Qoder 0.4.3). Only x64 and arm64
+// are renamed; any other arch goes as Node names it.
+function machineOS(arch = process.arch, platform = process.platform) {
+  return ({ x64: "x86_64", arm64: "aarch64" }[arch] ?? arch) + "_" + platform
+}
+
+// machineHostname is the Cosy-MachineHostname Qoder's client puts on a chat
+// request: os.hostname(), sent as it is when it is printable ASCII, else
+// its punycode, else made safe and marked with a hash of the original, at
+// most 96 characters (its zei). "" (none is sent) for an empty name.
+const HOST_SAFE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/u
+function machineHostname(name = hostname()) {
+  const hash = (v) => createHash("sha256").update(v, "utf8").digest("hex").slice(0, 8)
+  const cap = (v) => {
+    if (v.length <= 96) return v
+    const head = v.slice(0, 96 - 8 - 1).replace(/[-\s]+$/u, "")
+    return head ? `${head}-${hash(v)}` : `unknown-${hash(v)}`
+  }
+  const v = String(name ?? "").trim()
+  if (!v) return ""
+  if (HOST_SAFE.test(v)) return cap(v)
+  const ascii = domainToASCII(v)
+  if (ascii && HOST_SAFE.test(ascii)) return cap(ascii)
+  const safe = v.replace(/[^\x21-\x7e]+/gu, "-").replace(/-{2,}/gu, "-").replace(/^-+|-+$/gu, "")
+  return cap(safe ? `${safe}-${hash(v)}` : `unknown-${hash(v)}`)
 }
 
 // userBlob is the account as the envelope carries it: AES-128-CBC under a
@@ -98,7 +122,9 @@ function cosyHeaders(url, u, body, site, ts = Math.floor(Date.now() / 1000)) {
   const cosyVersion = site?.cosyVersion ?? COSY_VERSION
   const blob = userBlob(u, site?.rsaKey)
   const payload = Buffer.from(
-    JSON.stringify({ version: "v1", requestId: hexID(), info: blob.info, cosyVersion, ideVersion: "" }),
+    // the request id is a dashed UUID, as Qoder's signer makes it; its
+    // ideVersion is "" too
+    JSON.stringify({ version: "v1", requestId: randomUUID(), info: blob.info, cosyVersion, ideVersion: "" }),
   ).toString("base64")
   let path = new URL(url).pathname
   if (path.startsWith("/algo")) path = path.slice(5)
@@ -125,6 +151,25 @@ function cosyHeaders(url, u, body, site, ts = Math.floor(Date.now() / 1000)) {
     "Cosy-Version": cosyVersion,
     "Login-Version": "v2",
   }
+}
+
+// chatHeaders are the headers of a chat (agent_chat_generation) call, as
+// Qoder's client builds them (its prepareInferRequest, then Vai): no
+// Cosy-ClientIp; Cosy-MachineToken and Cosy-MachineType are its device
+// identity's (the runtime-info the check-in reads), or left off when it has
+// none, rather than the machine id cosyHeaders puts there; and the
+// machine's hostname. Every other call keeps cosyHeaders' set, which is
+// its prepareRequest's: there ClientIp, MachineId and MachineToken are all
+// the machine id (#443).
+function chatHeaders(url, u, body, site, model, identity = {}) {
+  const h = cosyHeaders(url, u, body, site)
+  delete h["Cosy-ClientIp"]
+  delete h["Cosy-MachineToken"]
+  delete h["Cosy-MachineType"]
+  for (const key of ["Cosy-MachineToken", "Cosy-MachineType"]) if (identity[key]) h[key] = identity[key]
+  const host = machineHostname()
+  if (host) h["Cosy-MachineHostname"] = host
+  return { ...h, Accept: "text/event-stream", "Cache-Control": "no-cache", "X-Model-Key": model.key, "X-Model-Source": model.source }
 }
 
 // ---- the body codec -----------------------------------------------------------
@@ -747,6 +792,28 @@ function callID(at, k, c) {
   return "call_" + createHash("sha256").update(`${at}\0${k}\0${c.function?.name ?? ""}\0${said}`).digest("hex").slice(0, 32)
 }
 
+// reasoningOf is the thinking an assistant turn of the chat carries back:
+// reasoning_content (DeepSeek's spelling, which magpie and most clients
+// send), else reasoning (OpenRouter's), else reasoning_details' text, ""
+// when it carries none.
+function reasoningOf(m) {
+  let text = ""
+  for (const k of ["reasoning_content", "reasoning"]) if (!text && typeof m[k] === "string") text = m[k]
+  if (!text && Array.isArray(m.reasoning_details)) text = m.reasoning_details.map((d) => (typeof d?.text === "string" ? d.text : typeof d?.summary === "string" ? d.summary : "")).join("")
+  // A blank one (magpie's gateway sends " " for a tool turn with no
+  // thinking) is no thinking at all.
+  return text.trim() ? text : ""
+}
+
+// An assistant turn's thinking goes back in reasoning_content, as Qoder's
+// own client sends it (qoder-agent-sdk, Qoder.app 0.x: its converter sets
+// reasoning_content on every earlier assistant turn that had thinking).
+// It was left out from the plugin's first version on, so a model behind
+// Qoder never saw what it had thought on the turns before (uk.jent on
+// Discord): on Qoder, DeepSeek-V4-Pro in a tool loop now recalls what its
+// thinking before the call said, and said it had none without it. A turn
+// with thinking and nothing else is still left out, as that client leaves
+// it.
 function qoderMessages(msgs) {
   const out = []
   const names = {}
@@ -805,7 +872,8 @@ function qoderMessages(msgs) {
         const args = c.function?.arguments
         return { id, type: "function", function: { name: c.function?.name, arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}) } }
       })
-      out.push({ role: "assistant", content: textOf(m.content), tool_calls: calls })
+      const think = reasoningOf(m)
+      out.push({ role: "assistant", content: textOf(m.content), ...(think ? { reasoning_content: think } : {}), tool_calls: calls })
       const open = calls.map((c) => c.id)
       const kept = new Set()
       for (let j = i + 1; j < msgs.length && msgs[j].role === "tool"; j++) {
@@ -819,7 +887,8 @@ function qoderMessages(msgs) {
     if (m.role === "assistant") blocks = blocks.filter((b) => b.type === "text")
     if (!blocks.length) continue
     if (m.role === "user" && seen.length) [blocks, seen] = [[...seen, ...blocks], []]
-    out.push({ role: m.role, content: blocks })
+    const think = m.role === "assistant" ? reasoningOf(m) : ""
+    out.push({ role: m.role, content: blocks, ...(think ? { reasoning_content: think } : {}) })
     // a result after the assistant's own words answers no call before it
     turn = null
   }
@@ -897,6 +966,10 @@ function sessionOf(chat, named = "") {
 // conversation by, from the chat.headers hook to the loader's fetch. It
 // goes no further: nothing of the request's headers is sent to Qoder.
 const SESSION = "x-magpie-qoder-session"
+// FALLBACK is "1" when magpie has another candidate after this request
+// (another account, provider or routing group member): a queued request is
+// then answered at once rather than waited out
+const FALLBACK = "x-magpie-fallback"
 
 // namedSession is the session a chat.headers hook is told, "" when it
 // names none. magpie, with no session header from the agent, makes one of
@@ -1090,7 +1163,8 @@ function failure(status, text) {
     const n = Number(queue?.retryAfterSeconds)
     const wait = Number.isFinite(n) && n > 0 ? Math.ceil(n) : BUSY_WAIT
     const model = queue?.modelKey ? ` for ${queue.modelKey}` : ""
-    const tier = queue?.queueType ? ` (this plan's queue: ${queue.queueType})` : ""
+    const ahead = Number(queue?.queueCount) > 0 ? `, ${Math.floor(Number(queue.queueCount))} ahead` : ""
+    const tier = queue?.queueType ? ` (this plan's queue: ${queue.queueType}${ahead})` : ahead ? ` (${ahead.slice(2)})` : ""
     const what = queue?.isQueued === true ? "queued the request" : "is busy"
     return { status: 503, message: `Qoder ${what}${model}${tier}; try again in ${wait}s`, retryAfter: wait, signIn: "", queue: queue ?? {} }
   }
@@ -1131,8 +1205,9 @@ const errorResponse = ({ status, message, signIn = status === 401 ? "kept" : und
 // the request's requestSetId, the model and the plan's queueType, at once
 // and then every retryAfterSeconds (held to 0.5s..30s, 30s when unsaid),
 // while the state says isQueued or serviceAvailable false. Once isQueued is
-// false it waits that state's retryAfterSeconds, if any, and sends the same
-// request again, request_set_id and all, up to 10 times. Three failed asks
+// false it waits that state's retryAfterSeconds, if any, and sends the
+// request again in the same request_set_id under a new request_id and
+// chat_record_id, up to 10 times; the refused call's stream is closed. Three failed asks
 // in a row, a 404 (no queue there) or a state with neither field end the
 // wait. Qoder's client waits up to an hour; here the whole of it is held
 // under QUEUE.budget from the request's start, since nothing reaches the
@@ -2014,6 +2089,36 @@ function gfmt(n) {
 
 const RFC3339 = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/i
 
+// Qoder's daily credits are a campaign of their own each day, listed from
+// 10:00 (UTC+8) to 09:59 the next day: its startAt and endAt, and its own
+// words, "Daily reset: 10:00 (UTC+8)" (a live list, 2026-10-28; sdytman on
+// Discord: qoder每天10点开始签到). So the check-in's day is the campaign's,
+// not the calendar's in any zone: a check-in before 10:00 meets the day
+// before's campaign, and the next one opens a day after that one's start,
+// a minute after its end. A check-in says when (until, RFC 3339), and
+// magpie asks again then, whatever the machine's time zone.
+const DAY_MS = 86_400_000
+// a minute's room for a computer clock that runs ahead of Qoder's
+const OPEN_ROOM_MS = 60_000
+
+// at is a time Qoder gives, in seconds or milliseconds, as milliseconds.
+const at = (v) => {
+  const n = Number(v)
+  if (v === null || v === undefined || v === "" || !Number.isFinite(n) || n <= 0) return undefined
+  return n > 1e12 ? n : n * 1000
+}
+
+// nextOpens is when the campaign after c is expected to open: a day after
+// c's start, or c's end when it runs longer than a day.
+const nextOpens = (c) => {
+  const start = at(c?.startAt), end = at(c?.endAt)
+  if (end === undefined) return undefined
+  return start === undefined ? end : Math.max(end, start + DAY_MS)
+}
+
+// askAgain is a check-in's until: when to ask again, with room.
+const askAgain = (t) => (Number.isFinite(t) ? { until: new Date(t + OPEN_ROOM_MS).toISOString() } : {})
+
 // when is a time Qoder gives: an RFC 3339 string, else seconds or
 // milliseconds, as a number or its text.
 function when(v) {
@@ -2023,7 +2128,20 @@ function when(v) {
   return new Date(Math.trunc(n < 1e12 ? n * 1000 : n)).toISOString()
 }
 
-// parseUsage is the plan and each pool of credits the envelope tells.
+// SPENT_IN_TURN are the pools Qoder spends one after another before an
+// account stops: the plan's credits, the account's own add-on credits and,
+// on a team, the organisation's shared add-on credits (docs.qoder.com/Credits
+// and account/teams/shared-add-on-credits: the soonest to expire first, the
+// plan's before add-on on the same day). The envelope's own
+// totalUsagePercentage counts them as one too. So the account has left what
+// they have left together: a plan used up beside add-on credits is no
+// account used up (magpie-community/plugins#454).
+const SPENT_IN_TURN = new Set(["Credits", "Add-on credits", "Shared credits"])
+
+// parseUsage is the plan and each pool of credits the envelope tells. When
+// more than one of the pools spent in turn holds credits, "Total credits"
+// is what they hold together, the one routing counts, and each pool is
+// shown beside it, set aside.
 function parseUsage(env) {
   if (env.displayMode === "enterprise") return { plan: "Enterprise" }
   const u = env.qoderUsage
@@ -2043,13 +2161,33 @@ function parseUsage(env) {
     if (total == null || total <= 0 || (b.used == null && b.remaining == null)) return
     const used = b.used != null ? b.used : total - b.remaining
     if (used < 0) return
-    out.windows.push({ name: b.name || name, used: Math.min(100, (100 * used) / total), display: `${gfmt(used)} / ${gfmt(total)} ${b.unit || "credits"}` })
+    const unit = b.unit || "credits"
+    const w = { name: b.name || name, used: Math.min(100, (100 * used) / total), display: `${gfmt(used)} / ${gfmt(total)} ${unit}` }
+    out.windows.push(w)
+    if (SPENT_IN_TURN.has(name)) turn.push({ w, used: Math.min(used, total), total, unit })
   }
+  const turn = []
   add(field("userQuota", "user_quota"), "Credits")
   add(field("addOnQuota", "add_on_quota"), "Add-on credits")
   add(field("orgResourcePackage", "org_resource_package"), "Shared credits")
+  // one count only when every pool counts in the same unit
+  if (turn.length > 1 && turn.every((p) => p.unit === turn[0].unit)) {
+    const used = turn.reduce((a, p) => a + p.used, 0)
+    const total = turn.reduce((a, p) => a + p.total, 0)
+    for (const p of turn) p.w.aside = true
+    out.windows.unshift({ name: "Total credits", used: Math.min(100, (100 * used) / total), display: `${gfmt(used)} / ${gfmt(total)} ${turn[0].unit}` })
+  }
   const dedicated = field("dedicatedResourcePackages", "dedicated_resource_packages")
   for (const b of Array.isArray(dedicated) ? dedicated : []) add(b, "Dedicated credits")
+  // A free account (personal_standard) with no add-on credits has a plan of
+  // 0 and nothing else: Qoder's client shows that pool as 0/0 and counts the
+  // account as out of credits. Without a window of its own magpie showed no
+  // credits at all (Ariel on Discord), so it reads as none left.
+  if (out.windows.length === 0) {
+    const zero = (b) => b !== null && typeof b === "object" && !Array.isArray(b) && (b.total ?? b.cap) === 0
+    const pools = [field("userQuota", "user_quota"), field("addOnQuota", "add_on_quota"), field("orgResourcePackage", "org_resource_package")]
+    if (pools.some(zero)) out.windows.push({ name: "Credits", used: 100, display: "0 credits left" })
+  }
   return out
 }
 
@@ -2229,11 +2367,29 @@ const makePlugin = (site) => async ({ client }) => {
       campaignMachines.set(uid, entry)
     }
     try {
-      return await entry.promise
+      const got = await entry.promise
+      if (campaignMachines.get(uid) === entry) readIdentities.set(uid, { at: entry.at, headers: got })
+      return got
     } catch (e) {
       if (campaignMachines.get(uid) === entry) campaignMachines.delete(uid)
       throw e
     }
+  }
+  // chatIdentity: the device identity a chat carries, as Qoder's client puts
+  // its native identity on when it has one. Only one this process has
+  // already read (a check-in) is used, so a chat never waits on, or is the
+  // first to run, Qoder's helper; one an hour old is read again behind the
+  // chat, as the desktop client renews its own hourly. {}: none yet.
+  const readIdentities = new Map()
+  const chatIdentity = (uid) => {
+    const known = uid ? readIdentities.get(uid) : undefined
+    if (!known) return {}
+    const now = Date.now()
+    if (now - (known.tried ?? known.at) >= CAMPAIGN_MACHINE_TTL) {
+      known.tried = now
+      machineForCampaign(uid).catch(() => {})
+    }
+    return known.headers
   }
   // campaignIdentity: the headers a campaigns request carries, and why
   // there are none where the site goes on without them (Qoder CN).
@@ -2493,16 +2649,21 @@ const makePlugin = (site) => async ({ client }) => {
       }
       if (listRes.status !== 200) return { outcome: "failed", message: `campaigns: HTTP ${listRes.status}` }
       const now = Date.now()
-      const active = (c) => (!c.startAt || c.startAt * 1000 <= now) && (!c.endAt || c.endAt * 1000 > now)
+      const active = (c) => (at(c.startAt) ?? -Infinity) <= now && now < (at(c.endAt) ?? Infinity)
       const campaigns = (Array.isArray(list.campaigns) ? list.campaigns : []).filter((x) => x?.actionType === "CLAIM_BENEFIT")
       const campaign = campaigns.find((x) => x.claimStatus === "CLAIMABLE")
       if (!campaign) {
         const done = campaigns.find((x) => x.claimStatus === "CLAIMED" && active(x))
         if (done) {
           const amount = Number(done.benefit?.amount)
-          return { outcome: "done", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}) }
+          return { outcome: "done", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}), ...askAgain(nextOpens(done)) }
         }
-        if (campaigns.length) return { outcome: "failed", message: "campaigns: today's credits aren't offered yet" }
+        // the next day's credits open at a time the list says: ask then,
+        // not half an hour later
+        if (campaigns.length) {
+          const next = Math.min(...campaigns.flatMap((c) => [at(c.startAt), nextOpens(c)]).filter((t) => t > now))
+          return { outcome: "failed", message: "campaigns: today's credits aren't offered yet", ...askAgain(next) }
+        }
         // Asked without Qoder CN's identity and offered nothing: what an
         // international list says to a request without one, so say why
         // (no Qoder CN on this machine) or ask again (it didn't answer).
@@ -2527,7 +2688,7 @@ const makePlugin = (site) => async ({ client }) => {
       if (claimRes.status !== 200) return { outcome: "failed", message: `claim: HTTP ${claimRes.status}` }
       if (said === "CLAIMED") {
         const amount = Number(claim?.benefit?.amount ?? claim?.data?.benefit?.amount ?? campaign.benefit?.amount)
-        return { outcome: "claimed", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}) }
+        return { outcome: "claimed", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}), ...askAgain(nextOpens(campaign)) }
       }
       return { outcome: "failed", message: `claim: ${said || "unknown answer"}` }
     } catch (e) {
@@ -2546,7 +2707,7 @@ const makePlugin = (site) => async ({ client }) => {
     })
 
   // ask is the answer to a chat completion on the live account cred.
-  const ask = async (chat, cred, init, named = "") => {
+  const ask = async (chat, cred, init, named = "", fallback = false) => {
     let m
     try {
       m = (await models(cred)).find((x) => x.key === chat.model) ?? (await models(cred, true)).find((x) => x.key === chat.model)
@@ -2561,30 +2722,41 @@ const makePlugin = (site) => async ({ client }) => {
     const CHAT_URL = api + CHAT_PATH
     const task = taskOf(sessionOf(chat, named), chat)
     const body = qoderBody(chat, m, named, task, siteOf(site, cred))
-    const wire = encodeBody(JSON.stringify(body))
-    // Qoder's queue is waited out (queueWait) and the same request, its
-    // request_set_id the one the queue knows, sent again
+    // Qoder's queue is waited out (queueWait) and the request sent again
+    // under the request_set_id the queue knows, with a new request_id and
+    // chat_record_id, as Qoder's client sends it (its o4i before each
+    // resend). On a real qoder.com account (plugins#427) the free models
+    // are queued in p3 for RESOURCE_LIMIT, about 30s at a time, and a
+    // resend can be queued again before it is answered.
     const deadline = QUEUE.now() + QUEUE.budget
     const ask = { requestSetId: body.request_set_id, requestId: body.request_id, sessionId: body.session_id, modelKey: m.key }
     for (let waited = 0; ; waited++) {
-      const headers = {
-        ...cosyHeaders(CHAT_URL, cred, wire, siteOf(site, cred)),
-        Accept: "text/event-stream",
-        "Cache-Control": "no-cache",
-        "X-Model-Key": m.key,
-        "X-Model-Source": m.source,
+      if (waited) {
+        body.request_id = body.chat_record_id = randomUUID()
+        ask.requestId = body.request_id
       }
+      const wire = encodeBody(JSON.stringify(body))
+      const headers = chatHeaders(CHAT_URL, cred, wire, siteOf(site, cred), m, chatIdentity(cred.uid))
+      // a refused call's stream is closed: Qoder keeps a 10605 stream open
+      // after its one event, and a connection held open while the call is
+      // waited out and sent again is one more the account holds
+      const call = new AbortController()
+      const signal = init.signal ? AbortSignal.any([init.signal, call.signal]) : call.signal
       let res, open
       try {
-        res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal: init.signal })
+        res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal })
         if (res.ok) open = await opened(res, chat.tool_choice !== "none" ? (chat.tools ?? []).filter((t) => t?.type === "function") : [])
       } catch (e) {
         return errorResponse({ status: 502, message: e.message })
       }
       const f = !res.ok ? failure(res.status, (await res.text()).slice(0, 1 << 20)) : open.first.value?.error
+      if (f) call.abort()
       // an answered call moves its task on, as Qoder's client moves it
       if (!f) task.answered = true
-      if (!f?.queue || waited >= QUEUE.recoveries) return f && !res.ok ? errorResponse(f) : answer(open, chat, servedName)
+      // with another account, provider or group member after this one
+      // (magpie's X-Magpie-Fallback), a queued request isn't waited out:
+      // its 503 goes back at once, saying the queue, and the next is asked
+      if (!f?.queue || waited >= QUEUE.recoveries || fallback) return f ? errorResponse(f) : answer(open, chat, servedName)
       try {
         if (!(await queueWait(api, cred, ask, f.queue, init.signal, deadline, siteOf(site, cred)))) return errorResponse(f)
       } catch (e) {
@@ -2658,7 +2830,7 @@ const makePlugin = (site) => async ({ client }) => {
             }
             const h = new Headers(input instanceof Request ? input.headers : undefined)
             new Headers(init.headers ?? {}).forEach((v, k) => h.set(k, v))
-            return signed(await ask(chat, cred, init, h.get(SESSION)?.trim().slice(0, 128) ?? ""), renewed(cred))
+            return signed(await ask(chat, cred, init, h.get(SESSION)?.trim().slice(0, 128) ?? "", h.get(FALLBACK) === "1"), renewed(cred))
           },
         }
       },
@@ -2833,4 +3005,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }

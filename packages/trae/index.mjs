@@ -2593,13 +2593,16 @@ const MAX = "-max"
 // (light, high, extra_high) and the one it defaults to. The request takes the
 // same names, as reasoning_effort, so a level an agent picks is sent as Trae
 // spells it. OpenCode knows the three as low/high/xhigh, so the map goes both
-// ways.
+// ways. Trae's client names two more, medium and max (its bundle's
+// reasoning_effort.{low,medium,high,extra_high,max}), handed out per model:
+// its app offers DeepSeek V4.1 Flash max (#434), so they are spelled here too,
+// and still offered only for a model whose entry names them.
 //
 // An entry without the config takes no level: Trae serves it at its own
 // default and nothing is sent. The plugin used to send none for every model,
 // which read as "Trae takes no level" — it takes them, per model, and an
 // entry that names none is the exception rather than the rule.
-const LEVELS = { light: "low", high: "high", extra_high: "xhigh" }
+const LEVELS = { light: "low", medium: "medium", high: "high", extra_high: "xhigh", max: "max" }
 
 // levelsOf is an entry's levels in OpenCode's names, in Trae's order: [] when
 // the entry names none, null when it names ones this map can't spell (so a

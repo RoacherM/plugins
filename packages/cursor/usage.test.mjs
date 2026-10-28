@@ -9,7 +9,9 @@ const real = globalThis.fetch
 afterEach(() => (globalThis.fetch = real))
 
 // a token that runs out in an hour
-const jwt = (exp) => ["e30", Buffer.from(JSON.stringify({ exp })).toString("base64url"), "sig"].join(".")
+// a token of this file's own: another file's {exp} alone can be the same
+// token, and would find the endpoint and list kept for it
+const jwt = (exp) => ["e30", Buffer.from(JSON.stringify({ exp, sub: "usage-" + Math.random() })).toString("base64url"), "sig"].join(".")
 const tok = jwt(Math.floor(Date.now() / 1000) + 3600)
 const auth = { type: "oauth", access: tok, refresh: "", expires: 0, accountId: "a@b.c" }
 // a sign-in of its own, so no plan asked before is remembered for it

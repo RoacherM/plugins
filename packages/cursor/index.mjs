@@ -827,7 +827,14 @@ function modelsOf(picker, ids, listed = []) {
     const def = defaultVariant({ variants })
     const { pid, levels: all } = effortsOf(defs)
     const levels = Object.fromEntries(Object.entries(all).filter(([, value]) => has(pid, value)))
-    const fam = fams.get(familyOf(def?.legacySlug || m.name).family) ?? []
+    // the usable ids of its default's family, else of the same model with
+    // thinking or without it: a Team's picker can default Claude Haiku 5.5
+    // to thinking while cursor-agent lists it as claude-haiku-5-5 alone
+    // (ysm119 on Discord, after 0.2.25), and a variant id it lacks is then
+    // asked as that one, as named() takes such an id
+    const own = familyOf(def?.legacySlug || m.name).family
+    const bare = own.replace(/-thinking$/, "")
+    const fam = fams.get(own) ?? fams.get(bare) ?? fams.get(bare + "-thinking") ?? []
     const base = { run: m.name, title: clean(m.clientDisplayName || m.name), pid, levels, fast: !!defs.fast?.length, variants, def, partial, model: m, fam, ids }
     const contexts = (defs.context ?? []).filter((c) => has("context", c))
     if (contexts.length) {
@@ -974,22 +981,66 @@ function fitEffort(want, levels) {
 // can't give is a failure: magpie keeps the list it had. A usable list it
 // can't give leaves the picker as it is.
 const lists = new Map()
+// listings are the lists being asked for now, by token: callers at once
+// share one ask; listFailed when a token's last ask failed
+const listings = new Map()
+const listFailed = new Map()
 async function usable(tok) {
   const h = createHash("sha256").update(tok).digest("hex")
   const had = lists.get(h)
   if (had && Date.now() - had.at < MODELS_KEEP) return had.raw
-  const [j, listed] = await Promise.all([
-    unary(API, "aiserver.v1.AiService/AvailableModels", tok, { useModelParameters: true, doNotUseMarkdown: true }, 30_000),
-    unary(API, "agent.v1.AgentService/GetUsableModels", tok, {}, 8_000).then(
-      (u) => (Array.isArray(u?.models) ? u.models : []),
-      () => [],
-    ),
-  ])
-  const ids = new Set(listed.flatMap((m) => [m?.modelId, m?.displayModelId]).filter(Boolean))
-  const raw = modelsOf(Array.isArray(j?.models) ? j.models : [], ids.size ? ids : null, listed)
-  if (!raw.length) throw new Error("Cursor listed no models")
-  lists.set(h, { at: Date.now(), raw })
-  return raw
+  return listing(tok, h)
+}
+function listing(tok, h) {
+  let p = listings.get(h)
+  if (p) return p
+  p = (async () => {
+    const [j, listed] = await Promise.all([
+      unary(API, "aiserver.v1.AiService/AvailableModels", tok, { useModelParameters: true, doNotUseMarkdown: true }, 30_000),
+      unary(API, "agent.v1.AgentService/GetUsableModels", tok, {}, 8_000).then(
+        (u) => (Array.isArray(u?.models) ? u.models : []),
+        () => [],
+      ),
+    ])
+    const ids = new Set(listed.flatMap((m) => [m?.modelId, m?.displayModelId]).filter(Boolean))
+    const raw = modelsOf(Array.isArray(j?.models) ? j.models : [], ids.size ? ids : null, listed)
+    if (!raw.length) throw new Error("Cursor listed no models")
+    lists.set(h, { at: Date.now(), raw })
+    listFailed.delete(h)
+    return raw
+  })()
+    .catch((e) => {
+      listFailed.set(h, Date.now())
+      throw e
+    })
+    .finally(() => listings.delete(h))
+  listings.set(h, p)
+  return p
+}
+
+// LIST_RETRY is how long a request goes on without the list after Cursor
+// couldn't give it, before it waits for an ask again.
+const LIST_RETRY = 5 * 60_000
+
+// listFor is the list a chat request picks its variant from. It is asked
+// before the Run, so a request never waits on it when it needn't: a list
+// past MODELS_KEEP is used as it is while a new one is asked for, and
+// after a failed ask the requests go without one for LIST_RETRY, as the
+// failed ask left them, instead of each waiting up to AvailableModels'
+// 30 s again before its Run (ysm119 on Discord: 33–36 s to the first
+// token on every Opus request). Only a token with no list at all, and no
+// failure lately, waits for it.
+async function listFor(tok) {
+  const h = createHash("sha256").update(tok).digest("hex")
+  const had = lists.get(h)
+  if (had && Date.now() - had.at < MODELS_KEEP) return had.raw
+  if (had) {
+    listing(tok, h).catch(() => {})
+    return had.raw
+  }
+  const failed = listFailed.get(h)
+  if (failed && Date.now() - failed < LIST_RETRY) return []
+  return listing(tok, h).catch(() => [])
 }
 
 // named is the model and variant an id the list doesn't have stands for,
@@ -1986,10 +2037,12 @@ async function agentURL(tok, fresh) {
 // had here (h2Blocked), the Runs after it go straight to HTTP/1.1 for
 // H2.retryAfter, or until a region error sends one back (answerOf); a
 // connection that failed (refused, no network) or a stream the server
-// refused leaves the next Run to try HTTP/2 again.
+// refused leaves the next Run to try HTTP/2 again. atOnce is how many
+// BidiAppends openH1 may have on their way at once, overlaps which messages
+// may be among them (openH1).
 let h1Until = 0
 const cancelledOpen = () => ({ error: { status: 410, message: "the request was cancelled" }, h2Failed: false })
-async function open(base, headers, signal) {
+async function open(base, headers, signal, atOnce = H1.atOnce, overlaps) {
   if (signal?.aborted) return cancelledOpen()
   if (Date.now() >= h1Until) {
     const o = await openH2(base, headers, signal)
@@ -2003,7 +2056,7 @@ async function open(base, headers, signal) {
     if (o.blocked) h1Until = Date.now() + H2.retryAfter
   }
   if (signal?.aborted) return cancelledOpen()
-  return openH1(headers, signal)
+  return openH1(headers, signal, atOnce, overlaps)
 }
 
 const H2 = {
@@ -2070,7 +2123,24 @@ function openH2(base, headers, signal) {
   })
 }
 
-const H1 = { appendWait: 60_000 } // ms a BidiAppend may take before the Run fails, as cursor-agent's appendTimeoutMs
+const H1 = {
+  appendWait: 60_000, // ms a BidiAppend may take before the Run fails, as cursor-agent's appendTimeoutMs
+  // BidiAppends on their way at once, numbered in order, as cursor-agent
+  // keeps them: one at a time, a new Run's history (a blob a message,
+  // hundreds for a long conversation, all asked for at once) took a round
+  // trip to Cursor each before the model could start. A native session's
+  // Run sends only its KV replies that way (kvReply); each of its other
+  // messages waits for every append before it, and goes alone (runNative).
+  atOnce: 16,
+}
+
+// kvReply is whether a client message (an AgentClientMessage, unframed) is
+// a KV reply, kv_client_message: a blob Cursor asked for, which nothing
+// else waits on. Cursor asks for a new Run's whole history at once.
+function kvReply(msg) {
+  const b = Buffer.isBuffer(msg) ? msg : Buffer.from(msg ?? EMPTY)
+  return b.length > 0 && b[0] === 0x1a // field 3, length-delimited
+}
 
 // connectCode is Connect's code for an HTTP status that came with no
 // Connect error of its own
@@ -2084,8 +2154,11 @@ function connectCode(status) {
 // the stream it reads, Connect's frames as the HTTP/2 Run's. Its response
 // is a 200 at once; an error Cursor says later, or a call that fails,
 // ends the stream with Connect's end frame, which runOnce reads as the
-// Run's own.
-function openH1(headers, signal) {
+// Run's own. overlaps says of a message whether it may go up while appends
+// before it are on their way (up to atOnce of them); one that may not waits
+// for all of them, goes alone, and its write's callback is its own append
+// answered.
+function openH1(headers, signal, atOnce = H1.atOnce, overlaps = () => true) {
   if (signal?.aborted) return Promise.resolve(cancelledOpen())
   const ac = new AbortController()
   const id = headers["x-request-id"]
@@ -2093,15 +2166,32 @@ function openH1(headers, signal) {
   let ended = false
   let seq = 0
   let reader
+  const going = new Set()
   const req = new Duplex({
     read() {},
     write(chunk, _enc, cb) {
       // runOnce writes one whole frame each time
       const msg = Buffer.from(chunk).subarray(5)
-      const n = seq++
-      // Keep the write buffered until its append finishes, so callbacks and
-      // drain reflect the pending upload rather than an unbounded promise chain.
-      append(msg, n).then(() => cb(), (e) => cb(e))
+      const go = () => {
+        const p = append(msg, seq++)
+        going.add(p)
+        const gone = () => going.delete(p)
+        p.then(gone, gone)
+        return p
+      }
+      if (!overlaps(msg)) {
+        // alone: after every append before it is answered, and answered
+        // itself before the next write
+        Promise.allSettled([...going]).then(go).then(() => cb(), (e) => cb(e))
+        return
+      }
+      go()
+      // Up to atOnce appends go at once; past that the write stays
+      // buffered until one finishes, so callbacks and drain reflect the
+      // pending upload rather than an unbounded promise chain. At one,
+      // a write's callback is its own append answered.
+      if (going.size < atOnce) return cb()
+      Promise.race(going).then(() => cb(), (e) => cb(e))
     },
   })
   const cleanup = () => {
@@ -2128,7 +2218,7 @@ function openH1(headers, signal) {
   }
   // append sends one message up. One that gets no answer by its deadline
   // (more time for a large one) ends the Run, as cursor-agent's
-  // bidi_append_deadline_exceeded does: the messages after it wait on it.
+  // bidi_append_deadline_exceeded does; so does one that fails.
   const append = async (msg, n) => {
     if (ended || ac.signal.aborted) return
     const body = pb().str(1, msg.toString("hex")).bytes(2, pb().str(1, id).done()).varint(3, n).done()
@@ -2364,6 +2454,15 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
       "x-cursor-agent-allowed-tools": "mcp_tool_call,get_mcp_tools_tool_call",
     },
     native.ac.signal,
+    // Over HTTP/1.1 the history's blobs go up H1.atOnce at a time, as
+    // cursor-agent sends them; one at a time, a Run with a long history
+    // waited a round trip to api2 a blob before its first token (ysm119 on
+    // Discord: 135 blobs, 37 s against 3 s over HTTP/2). Everything else
+    // goes alone, after the appends before it were answered, and counts as
+    // written only once Cursor answered it, so a tool result is never
+    // uncertain.
+    H1.atOnce,
+    kvReply,
   )
   if (o.error) {
     native.fail(o.error)
@@ -2865,10 +2964,7 @@ async function answerOf(auth, chat, signal, session = "") {
   if (prepared.owner) r = prepared.owner.resume({ ...prepared, estimate: conversation(chat, tools).estimate }, signal)
   const model = String(chat.model ?? "")
   if (!r) {
-    let raw = []
-    try {
-      raw = await usable(tok)
-    } catch {}
+    const raw = await listFor(tok)
     // fast only when asked: a service_tier of priority or fast is on; any
     // other tier, or none, is off, unless the id is a fast one of Cursor's own
     const tier = chat.service_tier
@@ -3099,4 +3195,4 @@ export async function CursorAuthPlugin() {
 }
 
 // for tests
-export const _internal = { keychain, keychainToken, nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, resetTeam: () => { teamRead.at = 0; teamRead.info = null }, expireTeam: () => (teamRead.at = 0),H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }
+export const _internal = { kvReply, listFor, lists, keychain, keychainToken, nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, resetTeam: () => { teamRead.at = 0; teamRead.info = null }, expireTeam: () => (teamRead.at = 0),H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }

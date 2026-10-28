@@ -43,6 +43,20 @@ function workHeaders(deviceId) {
     'X-Msh-Platform':'kimi-code-cli','X-Msh-Version':KIMI_CODE_VERSION,'X-Msh-Daimon-Version':DAIMON_VERSION};
 }
 const expired = () => Object.assign(Error('请先在本机 Kimi 桌面版登录 Work，再重新连接 Kimi Work 供应商。'), {signIn:'expired',code:'kimi_work_login_expired'});
+// Kimi's daimon-share itself is gone (moved, deleted, a drive not mounted):
+// the sign-in in it isn't known to have lapsed, so the account is not marked
+// signed out ("kept"), and the message names the folder (#444). Kimi makes
+// the folder again only when it starts, so signing in again in a running
+// Kimi doesn't bring it back; putting it back does, at once.
+const shareMissing = dir => Object.assign(Error('Kimi Work 的数据目录不存在：' + dir
+  + '。如果移动或删除过它，把它放回原处即可恢复，无需重新登录；否则请完全退出并重新打开 Kimi 桌面版（它会重建这个目录），再登录 Work。'),
+  {signIn:'kept',code:'kimi_work_share_missing',file:dir,shareMissing:true});
+// An account signed in here that Kimi has since switched away from, with no
+// Work key of its own left in Kimi's key store (#440).
+const notHere = (revoked=false) => Object.assign(Error(revoked
+  ? '这个 Kimi Work 账号在本机的 Work 密钥已失效。请在 Kimi 桌面版切换到这个账号进入一次 Work，Kimi 会换一把新的。'
+  : '这个 Kimi Work 账号已不是 Kimi 桌面版当前登录的账号，本机也没有它的 Work 密钥。请在 Kimi 桌面版切换到这个账号进入一次 Work，之后切回别的账号它也能继续用。'),
+  {signIn:'expired',code:'kimi_work_account_not_here'});
 const unavailable = error => Object.assign(Error('Kimi Work 连接失败：' + (error?.cause?.code || error?.message || '未知网络错误'), {cause:error}), {code:'kimi_work_connection_failed'});
 const percent = x => typeof x === 'number' && Number.isFinite(x) ? Math.max(0,Math.min(100,x*100)) : undefined;
 
@@ -247,11 +261,40 @@ function readDeviceId(file) {
   } catch {return undefined;}
 }
 
+const accountUid = userId => createHash('sha256').update('kimi-work-account\0'+userId).digest('hex');
+// The Work keys Kimi minted, one per Kimi user that has used Work on this
+// computer: <daimon>/kimi-code-key.json, {"v":2,"keys":[{userId,apiKey,
+// keyId?}]}, the user in use first (Kimi 3.2.21's DaimonProvision). Kimi
+// keeps a user's entry when it switches to another user, and reuses it when
+// it switches back; it drops one only when agent-gw answers it 401. So an
+// account Kimi has switched away from still has its key here (#440). Read
+// as Kimi reads it: any other version, or an entry without both strings,
+// is none. Keyed by the account's hashed uid; the first entry for a user
+// wins, as Kimi's find does.
+function readKeys(file) {
+  const out=Object.create(null);
+  try {
+    if(fs.statSync(file).size>1024*1024)return out;
+    const doc=JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
+    if(doc?.v!==2||!Array.isArray(doc.keys))return out;
+    for(const k of doc.keys)
+      if(typeof k?.userId==='string'&&k.userId&&typeof k.apiKey==='string'&&k.apiKey)out[accountUid(k.userId)]??=k.apiKey;
+  } catch {}
+  return out;
+}
+
+// A Windows path is taken apart as one wherever the plugin runs (tests).
+const pathOf = f => /^(?:[A-Za-z]:[\\/]|\\\\)/.test(f)?path.win32:path;
+
 // Read the live Work sign-in, including after rotation. Never consume its
 // refresh token or write the desktop app's configuration. The internal field
 // is called kimiCode, but this credential is issued for agent-gw (Work).
 function readDesktop(file=desktopFile()) {
-  if(!fs.existsSync(file))throw Object.assign(expired(),{file,missing:true});
+  const P=pathOf(file),daimon=P.dirname(file),share=P.dirname(daimon);
+  if(!fs.existsSync(file)) {
+    if(!fs.existsSync(share))throw shareMissing(share);
+    throw Object.assign(expired(),{file,missing:true});
+  }
   try {
     const st=fs.statSync(file);
     if(!st.isFile() || st.size>8*1024*1024) throw expired();
@@ -260,7 +303,7 @@ function readDesktop(file=desktopFile()) {
     if(typeof work?.apiKey!=='string'||!work.apiKey || typeof web?.accessToken!=='string'||!web.accessToken
       || typeof web.userId!=='string'||!web.userId || work.baseUrl?.replace(/\/$/,'')!==BASE) throw expired();
     return {workToken:work.apiKey,webToken:web.accessToken,deviceId:readDeviceId(file),
-      uid:createHash('sha256').update('kimi-work-account\0'+web.userId).digest('hex')};
+      uid:accountUid(web.userId),keys:readKeys(P.join(daimon,'kimi-code-key.json'))};
   } catch {throw Object.assign(expired(),{file});}
 }
 
@@ -336,10 +379,17 @@ function workConfigRows(payload) {
 }
 
 function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platform=process.platform}={}) {
+  // The account's session: Kimi's own sign-in when the account is the one
+  // Kimi is signed in to, else its Work key from Kimi's key store, with no
+  // web sign-in (Kimi keeps only the current user's), so its allowance
+  // can't be read (#440).
   const current=auth=>{
     const session=readSession();
-    if(auth?.source!=='kimi-work-desktop'||auth.uid!==session.uid)throw expired();
-    return session;
+    if(auth?.source!=='kimi-work-desktop')throw expired();
+    if(auth.uid===session.uid)return session;
+    const key=typeof auth.uid==='string'?session.keys?.[auth.uid]:undefined;
+    if(!key)throw notHere();
+    return {workToken:key,webToken:'',deviceId:session.deviceId,uid:auth.uid,away:true};
   };
   async function jsonRequest(url,token,body,signal,deviceId) {
     const response=await fetchImpl(url,{method:body===undefined?'GET':'POST',
@@ -398,6 +448,7 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
           catch(error){
             // Which file was read goes in the message, so a report says
             // where Kimi's sign-in was looked for (#425); never a value.
+            if(error?.shareMissing)return {type:'failed',error:error.message};
             return {type:'failed',error:'没有可用的本机 Kimi Work 登录，请先打开 Kimi 并登录 Work。'
               +(error?.file?(error.missing?'（未找到 ':'（无法读取 ')+error.file+'）':'')};
           }
@@ -408,9 +459,13 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
             return {type:'failed',error:'已找到本机 Kimi Work 登录，但连接 Kimi Work 失败（'+why+'），请检查网络后再试。'};
           }
           // Only an account reference is saved in Magpie. Actual credentials
-          // stay in Kimi's own file and are reread for every operation.
+          // stay in Kimi's own files and are reread for every operation.
+          // Each Kimi user is an account of its own, named by the start of
+          // its hashed uid, so a second one signed in sits beside the first
+          // (magpie keeps one per accountId and uid) and the two are told
+          // apart (#440).
           return {type:'success',access:'',refresh:'',expires:0,source:'kimi-work-desktop',
-            accountId:'Kimi Work (local)',uid:s.uid};
+            accountId:'Kimi Work · '+s.uid.slice(0,6),uid:s.uid};
         },
       })}],
       loader:async getAuth=>({
@@ -442,7 +497,7 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
           let response;
           try { response=await fetchImpl(BASE+'/chat/completions',{...options,method:'POST',headers,redirect:'error'}); }
           catch(error) { if(options.signal?.aborted)throw error; throw unavailable(error); }
-          if(response.status===401) { await response.body?.cancel(); throw expired(); }
+          if(response.status===401) { await response.body?.cancel(); throw s.away?notHere(true):expired(); }
           // Magpie classifies rate vs quota from the upstream response. Keep
           // its wording, reset details and Retry-After instead of guessing.
           return response;
@@ -459,6 +514,7 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
       usage:async getAuth=>{
         const s=current(await getAuth());
         const plan='Kimi Work · 会员共享额度';
+        if(s.away)return {plan,windows:[],error:'这个账号不是 Kimi 桌面版当前登录的账号，切换到它后才能读取会员额度（对话不受影响）',signIn:'kept'};
         let j;
         try {j=await jsonRequest(MEMBER+'GetSubscriptionStats',s.webToken,{});}
         catch(error) {
@@ -493,4 +549,4 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
 }
 
 export default async function KimiWorkProvider(){return createPlugin();}
-export const _internal={createPlugin,moonshotTools,moonshotSchema,readDesktop,desktopFile,shareDir,userDataDir,modelRows,workConfigRows,BASE,MEMBER,CONFIG,UA,workHeaders,webHeaders,readDeviceId};
+export const _internal={createPlugin,moonshotTools,moonshotSchema,readDesktop,readKeys,desktopFile,shareDir,userDataDir,modelRows,workConfigRows,BASE,MEMBER,CONFIG,UA,workHeaders,webHeaders,readDeviceId};

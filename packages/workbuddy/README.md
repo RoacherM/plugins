@@ -124,7 +124,11 @@ estimate.
 
 Each chat carries WorkBuddy's headers:
 - `Authorization`, `X-User-Id`, `X-Domain`, `X-Product: SaaS`, `X-IDE-Type: WorkBuddy`;
-- `User-Agent: WorkBuddy/5.5.6`. Without it, WorkBuddy answers error 10085;
+- the desktop CLI's `User-Agent`, `WorkBuddy/<app> <appName>/<app> CLI/<cli>`:
+  `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0` on the China build and
+  `WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0` on WorkBuddy AI, each
+  build's current app on 2026-10-28; `X-IDE-Version` is the app's version.
+  A User-Agent not starting `WorkBuddy/<version>` is answered error 10085;
 - the client's, which WorkBuddy's usage list shows as the client that asked
   (使用端): `X-Agent-Purpose: conversation`, `X-IDE-Name: WorkBuddy`,
   `X-IDE-Version`, `X-Agent-Intent: craft`, `X-Requested-With`. Both builds
@@ -139,7 +143,15 @@ Each chat carries WorkBuddy's headers:
   else the chat's first user message; nothing is made up when neither names
   one, a made-up conversation of the request's own being what splits one
   conversation into many in the usage detail;
-- WorkBuddy AI also takes `X-Agent-Type: main`.
+- what the CLI adds to a model request alone: `X-Agent-Type: main` on both
+  builds, `X-Agent-Runtime: local-agent` on the China build (new in 5.9),
+  `Accept: application/json`, and the `X-Stainless-*` headers of the OpenAI
+  SDK it sends through (openai 6.25.0 on Electron 37's Node v22.21.1, a
+  1200s timeout, no retries).
+
+Not sent: `X-Device-Token`, which the desktop app gets from Tencent's
+native device SDK before each prompt, and a `traceparent`, which the CLI
+adds only while its server-side tracing is on.
 
 A chat that doesn't open with a system message is given WorkBuddy's
 default one, as the app does.
@@ -164,8 +176,12 @@ refusal rests the account.
 
 The loader also translates OpenAI-compatible request spellings WorkBuddy
 doesn't take: `max_completion_tokens` becomes `max_tokens`, `developer`
-messages become `system`, and an object `tool_choice` becomes WorkBuddy's
-string form.
+messages become `system`, an object `tool_choice` becomes WorkBuddy's
+string form, and an earlier assistant turn's `reasoning_content` (or
+`reasoning_details` text) goes as `reasoning`, the field WorkBuddy's own
+client sends. WorkBuddy drops `reasoning_content`, so a client such as Grok
+Build that sends it lost its earlier thinking; nothing is folded into the
+message's content.
 
 A chat's tools are given shapes WorkBuddy's models take. Without them
 WorkBuddy AI answers 400 "Invalid request parameters" (11133), DeepSeek's
@@ -227,6 +243,22 @@ the price now, with the price before it (`rateWas`). A price that holds only
 some hours of the day (Hy4 preview, free 23:00–8:00) is given as its full
 price, never as free: magpie keeps the list until it asks again, so a list
 asked for at night would say "free" all day (#121).
+
+### Free models only
+
+Each site (WorkBuddy, WorkBuddy AI) has a "Free models only" switch in its
+provider settings in magpie, off by default (#430). When it is on:
+
+- the list holds only the models the site serves at no cost now. A model free
+  only at night, or one with no price, counts as paid;
+- a request for any other model is answered by the plugin with a 404
+  `model_not_found` and never sent, so no credits are spent. magpie rests
+  only that model and tries the next provider;
+- if the price list can't be read, nothing is sent (503), since whether the
+  model is free is unknown. An API key WorkBuddy lists no prices for lists
+  no models.
+
+The price list is read again at most once a minute for requests.
 
 ## Credits in magpie
 

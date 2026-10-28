@@ -158,7 +158,7 @@ itself.
 |---|---|
 | A refused sign-in (no code, or code 105) | 401 |
 | A quota (codes 110, 112–119, 122) | 429 |
-| Busy or queued for the model (code 10605) | Since 0.2.28 the request waits in Qoder's queue as Qoder's client does (below), then is sent again; past the wait, 503 with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none). The sign-in is untouched |
+| Busy or queued for the model (code 10605) | Since 0.2.28 the request waits in Qoder's queue as Qoder's client does (below), then is sent again; past the wait, 503 with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none). Since 0.2.40, when magpie has another candidate after this request (`x-magpie-fallback: 1`), the 503 comes at once, saying the queue and how many are ahead, and magpie asks the next. The sign-in is untouched |
 | A refusal of the request itself (codes 406, 416, 430, 80411, 80412, 100400–100403) | 400, with Qoder's words |
 | "Error in upstream response", the model's own vendor behind Qoder failing, which Qoder sends as a 400 (since 0.2.24) | 502, so magpie asks again or another account; the sign-in is untouched |
 | A failure before the answer starts | Qoder's status |
@@ -390,6 +390,19 @@ Qoder CN's `runtime-info` for environment `0` (the international one is
 - `<openapi>` is `openapi.qoder.sh` (Qoder) or `openapi.qoder.com.cn`
   (Qoder CN). Other pages on those hosts are still refused.
 
+**When it is asked (0.2.43).** The daily 100 credits are a campaign of
+their own each day, listed from 10:00 (UTC+8) to 09:59 the next day
+(`startAt`/`endAt`; the campaign's own text says "Daily reset: 10:00
+(UTC+8)", a live list on 2026-10-28). A check-in before 10:00 meets the day
+before's campaign: it claims that one if it is still open. Every answer
+that knows the window carries `until`, the next campaign's opening (a day
+after this one's start, or its end when it runs longer) plus a minute, and
+magpie (with `until` support) asks again then, so today's credits are
+claimed a minute or two after 10:00 (UTC+8), whatever the computer's time
+zone, with nothing to set. Between the old campaign's end at 09:59 and
+10:00 the check-in is `failed` with `until` 10:01. An older magpie ignores
+`until` and asks once a Beijing calendar day, as before.
+
 Taken from [wallechfox/qoder-checkin](https://github.com/wallechfox/qoder-checkin),
 which a user reports works, and Qoder desktop 0.4.3's campaign requests.
 International campaign discovery was checked with a real account on
@@ -426,6 +439,14 @@ reaches the agent meanwhile (magpie keeps a stream alive with comments for
 cancelled request end the wait early. Qoder's client also reports the end
 of its turn to `/api/v2/service/ask/finish`; the plugin doesn't, and
 Qoder releases that lease on its own TTL. `queue.test.mjs` has the wait.
+
+Since **0.2.40** the wait is only for the last candidate: when magpie says
+another account, provider or routing group member follows this request
+(its `x-magpie-fallback: 1` header, which the plugin host keeps from Qoder),
+a queued request is answered at once with the 503 above, e.g. "Qoder queued
+the request for dfmodel (this plan's queue: p3, 3 ahead); try again in
+30s", and magpie asks the next instead of keeping the agent in Qoder's
+queue.
 
 For a bounded offline reproduction, run `packages/qoder/busy.test.mjs`
 from #185 in an isolated temporary HOME. It compares plain queue JSON,

@@ -845,3 +845,53 @@ test("usage and check-in of a banned account say the ban and keep the sign-in", 
     globalThis.fetch = realFetch
   }
 })
+
+// plugins#437 (tmuer): AutoClaw's CN gateway answers 500 {"message":"parse
+// response failed"} to each of these, the reporter's own fragments sent
+// straight to it. What an agent's history can hold of them is put right
+// before it goes; what reads right goes as it was.
+test("the shapes AutoClaw's gateway can't read go put right, on both channels (#437)", async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) })
+    return Response.json({ choices: [{ message: { role: "assistant", content: "ok" } }] })
+  }
+  const history = [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: null },
+    { role: "assistant", content: "a", reasoning_content: "think" },
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "exec" } }] },
+    { role: "tool", tool_call_id: "c1", content: "done" },
+    { role: "assistant", tool_calls: [{ id: "c2", type: "function", function: { name: "read", arguments: { path: "a.txt" } } }] },
+    { role: "tool", tool_call_id: "c2", content: "x" },
+    { role: "assistant", content: "", tool_calls: [{ id: "c3", type: "function", function: { name: "glob", arguments: "{\"p\":\"*\"}" } }] },
+  ]
+  try {
+    for (const make of [AutoclawCnAuthPlugin, AutoclawAuthPlugin]) {
+      const hooks = await make({ client: { auth: { set: async () => {} } } })
+      const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+      for (const tools of ["x", []]) {
+        const res = await loader.fetch("x", { method: "POST", body: JSON.stringify({ model: "zaicoding_glm-5.3", tools, tool_choice: "auto", messages: history }) })
+        expect(res.status).toBe(200)
+        const { body } = calls.at(-1)
+        expect("tools" in body).toBe(false)
+        expect("tool_choice" in body).toBe(false)
+        const m = body.messages.slice(1) // after the system prompt the plugin puts first
+        expect(m[1]).toEqual({ role: "assistant", content: "" })
+        expect(m[2]).toEqual({ role: "assistant", content: "a" })
+        expect(m[3].content).toBe("")
+        expect(m[3].tool_calls[0].function).toEqual({ name: "exec", arguments: "{}" })
+        expect(m[5].tool_calls[0].function.arguments).toBe("{\"path\":\"a.txt\"}")
+        expect(m[7]).toEqual(history[7]) // read right: as it was
+      }
+      // a list of tools goes as it was
+      const tools = [{ type: "function", function: { name: "exec", parameters: { type: "object", properties: {} } } }]
+      await loader.fetch("x", { method: "POST", body: JSON.stringify({ model: "zaicoding_glm-5.3", tools, tool_choice: "auto", messages: [{ role: "user", content: "hi" }] }) })
+      expect(calls.at(-1).body.tools).toEqual(tools)
+      expect(calls.at(-1).body.tool_choice).toBe("auto")
+    }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})

@@ -116,7 +116,37 @@ test("WorkBuddy AI takes the ids too, with its client's headers", async () => {
   expect(turn(ai)).toMatch(HEX32)
   expect(conv(ai)).toMatch(HEX32)
   expect(ai.get("x-ide-name")).toBe("WorkBuddy")
-  expect(ai.get("user-agent")).toBe("WorkBuddy/5.5.6")
+  expect(ai.get("user-agent")).toBe("WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0")
+})
+
+// What WorkBuddy's desktop CLI sends with a chat, read from each build's
+// current app (China 5.9.3 with CLI 2.165.0, WorkBuddy AI 5.8.4 with CLI
+// 2.161.0): UserAgentHttpInterceptor's User-Agent, the app's version as
+// the IDE's, X-Agent-Type on both builds, 5.9's X-Agent-Runtime, and the
+// OpenAI SDK's headers its fetch passes on.
+test("each build's chat carries its desktop client's headers", async () => {
+  const sdk = {
+    accept: "application/json",
+    "x-agent-type": "main",
+    "x-stainless-lang": "js",
+    "x-stainless-package-version": "6.25.0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v22.21.1",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "1200",
+  }
+  const want = {
+    workbuddy: [WorkBuddyAuthPlugin, { ...sdk, "user-agent": "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0", "x-ide-version": "5.9.3", "x-agent-runtime": "local-agent" }],
+    "workbuddy-ai": [WorkBuddyAIAuthPlugin, { ...sdk, "user-agent": "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0", "x-ide-version": "5.8.4", "x-agent-runtime": null }],
+  }
+  for (const [provider, [plugin, heads]] of Object.entries(want)) {
+    const h = await ask(send("hi"), { provider, plugin, headers: { "x-agent-runtime": "cloud-agent" } })
+    for (const [name, v] of Object.entries(heads)) expect([provider, name, h.get(name)]).toEqual([provider, name, v])
+    expect(h.get("x-stainless-os")).toMatch(/^(MacOS|Windows|Linux|FreeBSD|OpenBSD|Android|Other:.+)$/)
+    expect(h.get("x-stainless-arch")).toMatch(/^(x64|arm64|arm|x32|other:.+)$/)
+    // nothing in what is sent names magpie or a tool other than WorkBuddy's
+    for (const [k, v] of h) expect([k, v.toLowerCase()].join(" ")).not.toMatch(/magpie|opencode/)
+  }
 })
 
 test("both builds carry what the usage list shows as the client (使用端)", async () => {
@@ -126,7 +156,6 @@ test("both builds carry what the usage list shows as the client (使用端)", as
     "x-agent-purpose": "conversation",
     "x-ide-name": "WorkBuddy",
     "x-ide-type": "WorkBuddy",
-    "x-ide-version": "5.5.6",
     "x-product": "SaaS",
     "x-agent-intent": "craft",
     "x-requested-with": "XMLHttpRequest",

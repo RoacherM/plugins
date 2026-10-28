@@ -50,8 +50,13 @@ plugin's `fetch` answers them on Cursor's agent API:
   after it go straight to HTTP/1.1 for 10 minutes; a failed connection
   (refused, no network) or a stream the server refused leaves the next Run
   to try HTTP/2 again. A region error over HTTP/1.1 sends the Run back to
-  HTTP/2 at the region's agent host. A BidiAppend with no answer in 60 s
-  (more for a large one) ends the Run, as cursor-agent does.
+  HTTP/2 at the region's agent host. BidiAppends go up numbered in order,
+  up to 16 at a time as cursor-agent sends them. A native session's Run
+  sends only its KV replies (the history's blobs) that way; a tool result
+  or anything else waits for the appends before it, goes alone, and is
+  written once Cursor answered it, so it is never uncertain. A BidiAppend
+  with no answer in 60 s (more for a large one) ends the Run, as
+  cursor-agent does.
 - A new Run imports the whole conversation as AI SDK messages kept as blobs
   the server asks for. The caller's tools are MCP tools, listed in the
   system prompt; the model calls them through Cursor's `CallDynamicTool`,
@@ -210,7 +215,10 @@ minutes), the way pi-cursor-sdk lists Cursor's catalog:
   them), fast the request's `service_tier`.
 - An id for a model with thinking that the account lists only without it
   (`claude-haiku-5-5-thinking` when the list has Claude Haiku 5.5 alone),
-  or the other way round, runs as the model the account has.
+  or the other way round, runs as the model the account has. So does a
+  picker model whose default thinks while the account lists it only
+  without thinking (`claude-haiku-5-5`), or the other way round: each of
+  its variant ids goes as the id the account lists.
 - An `@<size>` id the list no longer has (`claude-opus-5-5@1m` when only
   300k is listed, or the model is listed unsized) runs at the model's
   nearest size, in Max Mode when the size asked for is over the model's
@@ -223,6 +231,11 @@ minutes), the way pi-cursor-sdk lists Cursor's catalog:
   Each is at the default context size, the request's `reasoning_effort`
   and `service_tier` counting as for a listed model. The list doesn't show
   these ids: pick the `@<size>` model for a window that is the model's.
+
+A chat request picks its variant from the same list without waiting for it
+when it needn't: a list past its 10 minutes is used while a new one is
+asked for, requests at once share one ask, and after an ask fails requests
+go without the list for 5 minutes instead of each waiting for it again.
 
 ## Usage
 

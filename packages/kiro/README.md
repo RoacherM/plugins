@@ -96,6 +96,11 @@ request:
   - A tool's images (a screenshot, Codex's view_image) go with the
     message that answers the call, as Kiro's tool results hold text alone.
   - Only the latest images are sent.
+  - An image Kiro would turn away for size (over 5 MiB as Base64, which is
+    3.75 MiB of file) is made smaller on the request being sent: its long
+    edge brought to 2000 pixels, then WebP or JPEG, smaller each try. One
+    that can't be read or brought under is replaced by a short note, so the
+    conversation goes on (#428). Smaller images are sent as they are.
   - Tools the history used but the request doesn't offer are declared.
 - It turns the AWS event stream Kiro answers with back into Messages'
   events (streamed) or one message. The reply includes text, thinking,

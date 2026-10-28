@@ -194,6 +194,39 @@ async function refusedNotSignIn(res) {
   return (await quotaRefusal(res)) ?? (await accountRefusal(res));
 }
 
+// tidyBody puts right, in place, what an agent's history can hold that
+// AutoClaw's chat gateway can't read: it answers each with 500 {"message":
+// "parse response failed"} and nothing more (plugins#437, tmuer, who
+// reproduced each on the CN gateway). A message's null or missing content
+// goes as "", an earlier turn's reasoning_content is left off (AutoClaw's
+// own client sends none back), a tool call's arguments that aren't a
+// string go as their JSON ("{}" for none), and tools that aren't a
+// non-empty list are left off with their tool_choice. What already reads
+// right is sent as it was.
+function tidyBody(payload) {
+  if (Array.isArray(payload.messages)) {
+    payload.messages = payload.messages.map((m) => {
+      if (!m || typeof m !== "object") return m;
+      const out = { ...m };
+      if (out.content == null) out.content = "";
+      delete out.reasoning_content;
+      if (Array.isArray(out.tool_calls)) {
+        out.tool_calls = out.tool_calls.map((c) => {
+          const args = c?.function?.arguments;
+          if (!c?.function || typeof args === "string") return c;
+          return { ...c, function: { ...c.function, arguments: args == null ? "{}" : JSON.stringify(args) } };
+        });
+      }
+      return out;
+    });
+  }
+  if ("tools" in payload && !(Array.isArray(payload.tools) && payload.tools.length)) {
+    delete payload.tools;
+    delete payload.tool_choice;
+  }
+  return payload;
+}
+
 function autoclawRewriteBody(rawBody) {
   let payload;
   try {
@@ -203,6 +236,7 @@ function autoclawRewriteBody(rawBody) {
   }
   if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return null;
 
+  tidyBody(payload);
   unflag(payload.messages);
 
   const idx = payload.messages.findIndex((m) => m && m.role === "system");
@@ -640,7 +674,7 @@ function managedHeaders(token, model) {
 }
 
 function rewriteManagedBody(body) {
-  const payload = JSON.parse(String(body ?? "{}"));
+  const payload = tidyBody(JSON.parse(String(body ?? "{}")));
   const model = typeof payload.model === "string" ? payload.model : "zai_auto";
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   payload.model = model;
@@ -1351,6 +1385,6 @@ export const _internal = {
   platformTm, md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,
   fetchUserProfile, accountDeviceId, accountDisplayName, startLocalOAuth,
-  FLAGGED, unflagged, unflag, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
+  FLAGGED, unflagged, unflag, tidyBody, rewriteManagedBody, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,
 };
